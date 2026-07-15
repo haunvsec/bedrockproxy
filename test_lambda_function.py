@@ -213,7 +213,7 @@ class ProxyTests(unittest.TestCase):
                         "monthly_budget_usd": 35.5,
                         "input_max_tokens": 200000,
                         "output_max_tokens": 64000,
-                        "model_enabled": {"claude-sonnet-5": True, "gpt-4o": False},
+                        "model_enabled": {"claude-sonnet-5": True, "claude-sonnet-4.6": False},
                     },
                 )
             )
@@ -222,9 +222,10 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(body["config"]["monthly_budget_usd"], 35.5)
         self.assertEqual(body["config"]["input_max_tokens"], 200000)
         models_by_alias = {model["alias"]: model for model in body["models"]}
-        self.assertFalse(models_by_alias["gpt-4o"]["enabled"])
+        self.assertFalse(models_by_alias["claude-sonnet-4.6"]["enabled"])
         self.assertEqual(models_by_alias["amazon-nova-lite"]["input_price_per_million"], 0.30)
-        self.assertEqual(models_by_alias["claude-haiku"]["output_price_per_million"], 5.00)
+        self.assertEqual(models_by_alias["claude-haiku-4.5"]["output_price_per_million"], 5.00)
+        self.assertEqual(set(models_by_alias), {"amazon-nova-lite", "claude-haiku-4.5", "claude-sonnet-4.6", "claude-sonnet-5"})
 
     def test_low_cost_model_pricing(self):
         self.assertAlmostEqual(proxy.cost_usd("global.amazon.nova-2-lite-v1:0", 1_000_000, 1_000_000), 2.80)
@@ -232,6 +233,15 @@ class ProxyTests(unittest.TestCase):
             proxy.cost_usd("global.anthropic.claude-haiku-4-5-20251001-v1:0", 1_000_000, 1_000_000),
             6.00,
         )
+        self.assertAlmostEqual(proxy.cost_usd("global.anthropic.claude-sonnet-4-6", 1_000_000, 1_000_000), 18.00)
+
+    def test_legacy_haiku_toggle_is_migrated_to_full_alias(self):
+        config_table = MemoryTable()
+        config_table.items[proxy.CONFIG_KEY] = {"quota_id": proxy.CONFIG_KEY, "model_enabled": {"claude-haiku": False, "gpt-4o": True}}
+        with patch.object(proxy, "table", return_value=config_table):
+            config = proxy.runtime_config()
+        self.assertFalse(config["model_enabled"]["claude-haiku-4.5"])
+        self.assertNotIn("gpt-4o", config["model_enabled"])
 
     def test_quota_history_returns_current_and_previous_months_newest_first(self):
         history_table = MemoryTable()

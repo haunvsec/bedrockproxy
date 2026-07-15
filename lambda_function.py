@@ -14,7 +14,7 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-
+    
 # Non-secret deployment settings. Edit these constants when the infrastructure changes.
 AWS_REGION = "ap-southeast-1"
 BEDROCK_REGION = "ap-southeast-1"
@@ -35,38 +35,23 @@ dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 
 
 DEFAULT_MODEL_MAP = {
-    # OpenAI-compatible alias -> Bedrock model ID.
-    "claude-sonnet-5": "global.anthropic.claude-sonnet-5",
-    # Keep a common OpenAI alias for clients that hard-code this model name.
-    "gpt-4o": "global.anthropic.claude-sonnet-5",
-    # Low-cost aliases. Both use Global Cross-Region Inference from Singapore.
+    # The only OpenAI-compatible Model Identifiers exposed by this proxy.
     "amazon-nova-lite": "global.amazon.nova-2-lite-v1:0",
-    "claude-haiku": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "claude-haiku-4.5": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "claude-sonnet-4.6": "global.anthropic.claude-sonnet-4-6",
+    "claude-sonnet-5": "global.anthropic.claude-sonnet-5",
 }
 
 # USD per 1M tokens. Promotional Sonnet 5 pricing through 2026-08-31.
 # Change to input=3.00/output=15.00 from 2026-09-01 unless AWS updates its pricing again.
 DEFAULT_MODEL_PRICING = {
-    "global.anthropic.claude-sonnet-5": {"input": 2.00, "output": 10.00},
     "global.amazon.nova-2-lite-v1:0": {"input": 0.30, "output": 2.50},
     "global.anthropic.claude-haiku-4-5-20251001-v1:0": {"input": 1.00, "output": 5.00},
+    "global.anthropic.claude-sonnet-4-6": {"input": 3.00, "output": 15.00},
+    "global.anthropic.claude-sonnet-5": {"input": 2.00, "output": 10.00},
 }
 
 DEFAULT_MODEL_GUIDANCE = {
-    "claude-sonnet-5": {
-        "display_name": "Claude Sonnet 5",
-        "description": "Model chính cho coding, phân tích và tác vụ phức tạp.",
-        "recommended_for": "Coding, reasoning, tài liệu khó; dùng khi chất lượng quan trọng hơn chi phí.",
-        "context_window_tokens": 1_000_000,
-        "max_output_tokens": 128_000,
-    },
-    "gpt-4o": {
-        "display_name": "GPT-4o alias → Claude Sonnet 5",
-        "description": "Alias tương thích cho client cố định tên model gpt-4o.",
-        "recommended_for": "Chỉ dùng khi ứng dụng không cho đổi tên model; chi phí giống Claude Sonnet 5.",
-        "context_window_tokens": 1_000_000,
-        "max_output_tokens": 128_000,
-    },
     "amazon-nova-lite": {
         "display_name": "Amazon Nova 2 Lite",
         "description": "Model giá thấp và nhanh; model gốc hỗ trợ đa phương thức nhưng proxy hiện nhận text.",
@@ -74,20 +59,37 @@ DEFAULT_MODEL_GUIDANCE = {
         "context_window_tokens": 1_000_000,
         "max_output_tokens": 64_000,
     },
-    "claude-haiku": {
+    "claude-haiku-4.5": {
         "display_name": "Claude Haiku 4.5",
         "description": "Claude nhẹ, phản hồi nhanh, vẫn mạnh cho coding và agent đơn giản.",
         "recommended_for": "Chatbot, coding nhẹ, extraction, routing và tác vụ cần độ trễ thấp.",
         "context_window_tokens": 200_000,
         "max_output_tokens": 64_000,
     },
+    "claude-sonnet-4.6": {
+        "display_name": "Claude Sonnet 4.6",
+        "description": "Sonnet ổn định đã được kiểm chứng, mạnh cho coding, agent và tác vụ chuyên sâu.",
+        "recommended_for": "Coding, phân tích dài, workflow nhiều bước và agent cần chất lượng cao.",
+        "context_window_tokens": 1_000_000,
+        "max_output_tokens": 64_000,
+    },
+    "claude-sonnet-5": {
+        "display_name": "Claude Sonnet 5",
+        "description": "Sonnet mới nhất, ưu tiên tác vụ coding, agent và reasoning phức tạp.",
+        "recommended_for": "Tác vụ khó cần output đến 128K token, khi account đã được cấp model access.",
+        "context_window_tokens": 1_000_000,
+        "max_output_tokens": 128_000,
+    },
 }
+
+# Preserve a user's previous toggle when upgrading from the shorter legacy alias.
+LEGACY_MODEL_ALIASES = {"claude-haiku": "claude-haiku-4.5"}
 
 CONFIG_KEY = "config#proxy"
 CREDENTIALS_KEY = "auth#credentials"
 ADMIN_SESSION_TTL_SECONDS = 8 * 60 * 60
 PASSWORD_HASH_ITERATIONS = 210_000
-PROXY_VERSION = "2026.07.15-route-compat-v6"
+PROXY_VERSION = "2026.07.15-four-models-v7"
 HISTORY_MONTH_LIMIT = 24
 
 
@@ -434,8 +436,15 @@ def runtime_config() -> Dict[str, Any]:
         config["input_max_tokens"] = int(item["input_max_tokens"])
     if "output_max_tokens" in item:
         config["output_max_tokens"] = int(item["output_max_tokens"])
-    if isinstance(item.get("model_enabled"), dict):
-        config["model_enabled"].update({str(key): bool(value) for key, value in item["model_enabled"].items()})
+    stored_models = item.get("model_enabled")
+    if isinstance(stored_models, dict):
+        # Ignore removed aliases (for example gpt-4o), while preserving the old Haiku toggle.
+        for alias in DEFAULT_MODEL_MAP:
+            if alias in stored_models:
+                config["model_enabled"][alias] = bool(stored_models[alias])
+        for old_alias, new_alias in LEGACY_MODEL_ALIASES.items():
+            if new_alias not in stored_models and old_alias in stored_models:
+                config["model_enabled"][new_alias] = bool(stored_models[old_alias])
     return config
 
 
