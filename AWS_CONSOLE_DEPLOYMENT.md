@@ -395,7 +395,7 @@ INVOKE_URL/dashboard
 Bản dashboard mới hiển thị cuối trang:
 
 ```text
-UI 2026.07.15-modal-v5 · Backend 2026.07.15-modal-v5
+UI 2026.07.15-route-compat-v6 · Backend 2026.07.15-route-compat-v6
 ```
 
 Nếu vẫn chỉ thấy hai model `claude-sonnet-5` và `gpt-4o`, bạn đang chạy code cũ:

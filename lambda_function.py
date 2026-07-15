@@ -87,7 +87,7 @@ CONFIG_KEY = "config#proxy"
 CREDENTIALS_KEY = "auth#credentials"
 ADMIN_SESSION_TTL_SECONDS = 8 * 60 * 60
 PASSWORD_HASH_ITERATIONS = 210_000
-PROXY_VERSION = "2026.07.15-modal-v5"
+PROXY_VERSION = "2026.07.15-route-compat-v6"
 HISTORY_MONTH_LIMIT = 24
 
 
@@ -1154,11 +1154,13 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         auth_error = authenticate(event)
         if auth_error:
             return auth_error
-        if method(event) == "GET" and path == "/v1/models":
+        # Keep compatibility with clients that append either /models to a root URL
+        # or /models to an OpenAI base URL ending in /v1.
+        if method(event) == "GET" and path in ("/models", "/v1/models"):
             return handle_models(event)
-        if method(event) == "GET" and path == "/v1/quota":
+        if method(event) == "GET" and path in ("/quota", "/v1/quota"):
             return handle_quota(event)
-        if method(event) == "POST" and path == "/v1/chat/completions":
+        if method(event) == "POST" and path in ("/chat/completions", "/v1/chat/completions"):
             return handle_chat_completions(event)
         return openai_error(404, f"Route not found: {method(event)} {path}")
     except json.JSONDecodeError:

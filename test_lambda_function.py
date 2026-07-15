@@ -150,6 +150,26 @@ class ProxyTests(unittest.TestCase):
             result = proxy.lambda_handler(event("GET", "/v1/models", token="wrong"), None)
         self.assertEqual(result["statusCode"], 401)
 
+    def test_models_route_supports_legacy_and_v1_paths(self):
+        with patch.object(proxy, "authenticate", return_value=None), patch.object(
+            proxy, "handle_models", return_value=proxy.response(200, {"object": "list", "data": []})
+        ) as models_handler:
+            legacy = proxy.lambda_handler(event("GET", "/models", token="client-secret"), None)
+            openai = proxy.lambda_handler(event("GET", "/v1/models", token="client-secret"), None)
+        self.assertEqual(legacy["statusCode"], 200)
+        self.assertEqual(openai["statusCode"], 200)
+        self.assertEqual(models_handler.call_count, 2)
+
+    def test_chat_route_supports_legacy_and_v1_paths(self):
+        with patch.object(proxy, "authenticate", return_value=None), patch.object(
+            proxy, "handle_chat_completions", return_value=proxy.response(200, {"object": "chat.completion"})
+        ) as chat_handler:
+            legacy = proxy.lambda_handler(event("POST", "/chat/completions", {}), None)
+            openai = proxy.lambda_handler(event("POST", "/v1/chat/completions", {}), None)
+        self.assertEqual(legacy["statusCode"], 200)
+        self.assertEqual(openai["statusCode"], 200)
+        self.assertEqual(chat_handler.call_count, 2)
+
     def test_admin_login_reports_actionable_dynamodb_permission_error(self):
         with patch.object(proxy, "table", return_value=DeniedTable()), patch("builtins.print"):
             result = proxy.lambda_handler(

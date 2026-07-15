@@ -8,6 +8,8 @@ Lambda này expose một API gần giống OpenAI:
 - `GET /v1/quota`
 - `POST /v1/chat/completions`
 
+Để tương thích với code proxy ban đầu và các client tự nối endpoint, Lambda cũng nhận `GET /models`, `GET /quota` và `POST /chat/completions`. Vì vậy client có thể dùng Base URL gốc hoặc Base URL kết thúc bằng `/v1`.
+
 Phía sau Lambda gọi Amazon Bedrock `Converse API`, rồi convert response về format OpenAI Chat Completions. Proxy cũng có quota theo số tiền/tháng, lưu usage, cấu hình và credential đã hash trong DynamoDB.
 
 Hiện bản này hỗ trợ non-streaming chat completion. `stream=true`, tool calling, vision input chưa bật.

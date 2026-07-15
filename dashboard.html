@@ -184,7 +184,7 @@
       <div id="credentialError" class="error"></div><div id="credentialSuccess" class="success">Đã cập nhật. Các phiên admin cũ đã bị vô hiệu hóa.</div>
       <div id="newApiKeyResult" class="secret-result">Hãy sao chép API key mới ngay; hệ thống sẽ không hiển thị lại.<code id="newApiKeyValue"></code><div class="actions"><button id="copyApiKey" class="copy" type="button">Sao chép API key</button></div></div>
     </form>
-    <footer>Phiên đăng nhập chỉ lưu trong tab hiện tại và tự hết hạn. <span id="buildInfo">UI 2026.07.15-modal-v5</span></footer>
+    <footer>Phiên đăng nhập chỉ lưu trong tab hiện tại và tự hết hạn. <span id="buildInfo">UI 2026.07.15-route-compat-v6</span></footer>
   </main>
 
   <script>
@@ -222,7 +222,7 @@
       const rootUrl=`${baseUrl.replace(/\/+$/,'')}/`; const openaiUrl=`${baseUrl.replace(/\/+$/,'')}/v1`;
       const apiDisplay=`•••••••• ${credentials?.api_key_hint||'(API key hiện tại)'}`;
       $('setupDialogModel').textContent=`${model.display_name||model.alias} · ${model.alias}`;
-      const note=document.createElement('p'); note.className='guide-note'; note.textContent=`Nếu client không tự thêm /v1, dùng OpenAI Base URL: ${openaiUrl}`;
+      const note=document.createElement('p'); note.className='guide-note'; note.textContent=`Proxy hỗ trợ cả Base URL gốc và OpenAI Base URL: ${openaiUrl}`;
       $('setupDialogGuide').replaceChildren(guideRow('Base URL',rootUrl,rootUrl),guideRow('Model Identifier',model.alias,model.alias),guideRow('API Key',apiDisplay),note);
       $('setupDialog').showModal();
     }
@@ -250,7 +250,7 @@
       $('updated').textContent=q.updated_at?`Cập nhật ${new Date(q.updated_at*1000).toLocaleString('vi-VN')}`:'Chưa có request trong tháng';
       $('budgetLock').textContent=modelBudgetLocked?'Đã kích hoạt khóa ngân sách tháng: toàn bộ model tự động tắt. Hãy tăng ngân sách lên cao hơn số tiền đã dùng để tự mở lại model, hoặc chờ sang tháng UTC mới.' : '';
       $('budgetLock').style.display=modelBudgetLocked?'block':'none'; $('saveModelsButton').disabled=modelBudgetLocked;
-      $('buildInfo').textContent=`UI 2026.07.15-modal-v5 · Backend ${data.proxy_version||'không rõ/đang dùng bản cũ'}`;
+      $('buildInfo').textContent=`UI 2026.07.15-route-compat-v6 · Backend ${data.proxy_version||'không rõ/đang dùng bản cũ'}`;
       renderHistory(data.history||[q],q.month);
       $('monthlyBudget').value=data.config.monthly_budget_usd; $('inputLimit').value=data.config.input_max_tokens; $('outputLimit').value=data.config.output_max_tokens;
       if(data.credentials){ $('adminUsername').value=data.credentials.admin_username; $('apiKeyHint').textContent=data.credentials.api_key_hint; $('adminName').textContent=`Đăng nhập: ${data.credentials.admin_username}`; }
