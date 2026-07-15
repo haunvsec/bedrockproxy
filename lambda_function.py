@@ -39,18 +39,56 @@ DEFAULT_MODEL_MAP = {
     "claude-sonnet-5": "global.anthropic.claude-sonnet-5",
     # Keep a common OpenAI alias for clients that hard-code this model name.
     "gpt-4o": "global.anthropic.claude-sonnet-5",
+    # Low-cost aliases. Both use Global Cross-Region Inference from Singapore.
+    "amazon-nova-lite": "global.amazon.nova-2-lite-v1:0",
+    "claude-haiku": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
 }
 
 # USD per 1M tokens. Promotional Sonnet 5 pricing through 2026-08-31.
 # Change to input=3.00/output=15.00 from 2026-09-01 unless AWS updates its pricing again.
 DEFAULT_MODEL_PRICING = {
     "global.anthropic.claude-sonnet-5": {"input": 2.00, "output": 10.00},
+    "global.amazon.nova-2-lite-v1:0": {"input": 0.30, "output": 2.50},
+    "global.anthropic.claude-haiku-4-5-20251001-v1:0": {"input": 1.00, "output": 5.00},
+}
+
+DEFAULT_MODEL_GUIDANCE = {
+    "claude-sonnet-5": {
+        "display_name": "Claude Sonnet 5",
+        "description": "Model chính cho coding, phân tích và tác vụ phức tạp.",
+        "recommended_for": "Coding, reasoning, tài liệu khó; dùng khi chất lượng quan trọng hơn chi phí.",
+        "context_window_tokens": 1_000_000,
+        "max_output_tokens": 128_000,
+    },
+    "gpt-4o": {
+        "display_name": "GPT-4o alias → Claude Sonnet 5",
+        "description": "Alias tương thích cho client cố định tên model gpt-4o.",
+        "recommended_for": "Chỉ dùng khi ứng dụng không cho đổi tên model; chi phí giống Claude Sonnet 5.",
+        "context_window_tokens": 1_000_000,
+        "max_output_tokens": 128_000,
+    },
+    "amazon-nova-lite": {
+        "display_name": "Amazon Nova 2 Lite",
+        "description": "Model giá thấp và nhanh; model gốc hỗ trợ đa phương thức nhưng proxy hiện nhận text.",
+        "recommended_for": "Chat thường, tóm tắt, phân loại, xử lý tài liệu và tự động hóa đơn giản.",
+        "context_window_tokens": 1_000_000,
+        "max_output_tokens": 64_000,
+    },
+    "claude-haiku": {
+        "display_name": "Claude Haiku 4.5",
+        "description": "Claude nhẹ, phản hồi nhanh, vẫn mạnh cho coding và agent đơn giản.",
+        "recommended_for": "Chatbot, coding nhẹ, extraction, routing và tác vụ cần độ trễ thấp.",
+        "context_window_tokens": 200_000,
+        "max_output_tokens": 64_000,
+    },
 }
 
 CONFIG_KEY = "config#proxy"
 CREDENTIALS_KEY = "auth#credentials"
 ADMIN_SESSION_TTL_SECONDS = 8 * 60 * 60
 PASSWORD_HASH_ITERATIONS = 210_000
+PROXY_VERSION = "2026.07.15-history-v4"
+HISTORY_MONTH_LIMIT = 24
 
 
 def response(status_code: int, body: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
@@ -423,6 +461,50 @@ def estimate_tokens_from_messages(messages: List[Dict[str, Any]]) -> int:
     return max(1, int(chars / 3))
 
 
+def mark_budget_exhausted(quota_id: str, budget: float) -> None:
+    table().update_item(
+        Key={"quota_id": quota_id},
+        UpdateExpression=(
+            "SET budget_exhausted = :true, budget_exhausted_at = :now, "
+            "monthly_budget_usd = :budget, updated_at = :now"
+        ),
+        ExpressionAttributeValues={
+            ":true": True,
+            ":now": int(time.time()),
+            ":budget": Decimal(decimal_str(budget)),
+        },
+    )
+
+
+def safe_mark_budget_exhausted(quota_id: str, budget: float) -> None:
+    try:
+        mark_budget_exhausted(quota_id, budget)
+    except Exception:
+        # The request is still blocked even if the dashboard flag could not be persisted.
+        print("Failed to persist budget circuit breaker:\n" + traceback.format_exc())
+
+
+def sync_budget_circuit(budget: float) -> None:
+    """Re-evaluate the current global monthly circuit after an admin budget change."""
+    quota_table = table()
+    quota_id = quota_id_for("admin-dashboard")
+    item = quota_table.get_item(Key={"quota_id": quota_id}, ConsistentRead=True).get("Item", {})
+    if not item:
+        return
+    spent = max(0.0, float(item.get("spent_usd", 0)))
+    if spent >= budget:
+        mark_budget_exhausted(quota_id, budget)
+        return
+    quota_table.update_item(
+        Key={"quota_id": quota_id},
+        UpdateExpression="SET monthly_budget_usd = :budget, updated_at = :now REMOVE budget_exhausted, budget_exhausted_at",
+        ExpressionAttributeValues={
+            ":budget": Decimal(decimal_str(budget)),
+            ":now": int(time.time()),
+        },
+    )
+
+
 def reserve_budget(
     api_key: str,
     model_id: str,
@@ -452,7 +534,10 @@ def reserve_budget(
                 "SET api_key_hash = :api_key_hash, #month = :month, updated_at = :updated_at, monthly_budget_usd = :budget "
                 "ADD spent_usd :reserved, request_count :one"
             ),
-            ConditionExpression="attribute_not_exists(spent_usd) OR spent_usd <= :remaining_after_reserve",
+            ConditionExpression=(
+                "(attribute_not_exists(spent_usd) OR spent_usd <= :remaining_after_reserve) AND "
+                "(attribute_not_exists(budget_exhausted) OR budget_exhausted = :false)"
+            ),
             ExpressionAttributeNames={"#month": "month"},
             ExpressionAttributeValues={
                 ":reserved": Decimal(decimal_str(reserved)),
@@ -462,14 +547,21 @@ def reserve_budget(
                 ":updated_at": int(time.time()),
                 ":budget": Decimal(decimal_str(budget)),
                 ":remaining_after_reserve": remaining_after_reserve,
+                ":false": False,
             },
         )
     except ClientError as exc:
         if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            safe_mark_budget_exhausted(quota_id, budget)
             raise PermissionError(f"Monthly budget exceeded. Budget: ${budget:.4f}/month.")
         raise
 
-    return {"enabled": True, "quota_id": quota_id, "reserved_usd": reserved}
+    return {
+        "enabled": True,
+        "quota_id": quota_id,
+        "reserved_usd": reserved,
+        "monthly_budget_usd": budget,
+    }
 
 
 def finalize_budget(reservation: Dict[str, Any], actual_usd: float, input_tokens: int, output_tokens: int) -> None:
@@ -477,7 +569,7 @@ def finalize_budget(reservation: Dict[str, Any], actual_usd: float, input_tokens
         return
 
     delta = actual_usd - float(reservation["reserved_usd"])
-    table().update_item(
+    result = table().update_item(
         Key={"quota_id": reservation["quota_id"]},
         UpdateExpression=(
             "SET updated_at = :updated_at "
@@ -489,7 +581,12 @@ def finalize_budget(reservation: Dict[str, Any], actual_usd: float, input_tokens
             ":output_tokens": Decimal(output_tokens),
             ":updated_at": int(time.time()),
         },
+        ReturnValues="ALL_NEW",
     )
+    attributes = result.get("Attributes", {}) if isinstance(result, dict) else {}
+    budget = float(reservation.get("monthly_budget_usd", 0))
+    if budget > 0 and float(attributes.get("spent_usd", 0)) >= budget:
+        safe_mark_budget_exhausted(reservation["quota_id"], budget)
 
 
 def refund_budget(reservation: Dict[str, Any]) -> None:
@@ -584,9 +681,10 @@ def finish_reason_from_bedrock(stop_reason: Optional[str]) -> str:
     return mapping.get(stop_reason or "", "stop")
 
 
-def handle_models() -> Dict[str, Any]:
+def handle_models(event: Dict[str, Any]) -> Dict[str, Any]:
     model_map = DEFAULT_MODEL_MAP
     config = runtime_config()
+    budget_exhausted = quota_snapshot(get_api_key(event))["budget_exhausted"]
     return response(
         200,
         {
@@ -599,7 +697,7 @@ def handle_models() -> Dict[str, Any]:
                     "owned_by": "bedrock",
                 }
                 for alias in sorted(model_map.keys())
-                if config["model_enabled"].get(alias, True)
+                if config["model_enabled"].get(alias, True) and not budget_exhausted
             ],
         },
     )
@@ -618,6 +716,7 @@ def quota_snapshot(api_key: str) -> Dict[str, Any]:
         ).get("Item", {})
     spent = max(0.0, float(item.get("spent_usd", 0)))
     remaining = max(0.0, budget - spent)
+    budget_exhausted = bool(item.get("budget_exhausted", False)) or (budget > 0 and spent >= budget)
     return {
         "enabled": budget > 0,
         "month": now_month(),
@@ -625,6 +724,8 @@ def quota_snapshot(api_key: str) -> Dict[str, Any]:
         "monthly_budget_usd": budget,
         "spent_usd": round(spent, 8),
         "remaining_usd": round(remaining, 8),
+        "budget_exhausted": budget_exhausted,
+        "budget_exhausted_at": int(item.get("budget_exhausted_at", 0)) or None,
         "used_percent": round((spent / budget * 100) if budget else 0, 2),
         "request_count": int(item.get("request_count", 0)),
         "input_tokens": int(item.get("input_tokens", 0)),
@@ -633,6 +734,66 @@ def quota_snapshot(api_key: str) -> Dict[str, Any]:
         "input_max_tokens_per_request": int(config["input_max_tokens"]),
         "output_max_tokens_per_request": int(config["output_max_tokens"]),
     }
+
+
+def quota_history(current_quota: Dict[str, Any], limit: int = HISTORY_MONTH_LIMIT) -> List[Dict[str, Any]]:
+    """Load global monthly usage records. The table has only a partition key, so a small Scan is used."""
+    quota_table = table()
+    items: List[Dict[str, Any]] = []
+    scan_args: Dict[str, Any] = {
+        "FilterExpression": "begins_with(quota_id, :prefix)",
+        "ProjectionExpression": (
+            "quota_id, #month, monthly_budget_usd, spent_usd, request_count, input_tokens, "
+            "output_tokens, updated_at, budget_exhausted, budget_exhausted_at"
+        ),
+        "ExpressionAttributeNames": {"#month": "month"},
+        "ExpressionAttributeValues": {":prefix": "global#"},
+    }
+    while True:
+        page = quota_table.scan(**scan_args)
+        items.extend(page.get("Items", []))
+        last_key = page.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        scan_args["ExclusiveStartKey"] = last_key
+
+    history_by_month: Dict[str, Dict[str, Any]] = {}
+    for item in items:
+        quota_id = str(item.get("quota_id", ""))
+        month = str(item.get("month") or quota_id.removeprefix("global#"))
+        if len(month) != 7 or month[4:5] != "-":
+            continue
+        budget = max(0.0, float(item.get("monthly_budget_usd", 0)))
+        spent = max(0.0, float(item.get("spent_usd", 0)))
+        history_by_month[month] = {
+            "month": month,
+            "monthly_budget_usd": round(budget, 8),
+            "spent_usd": round(spent, 8),
+            "remaining_usd": round(max(0.0, budget - spent), 8),
+            "used_percent": round((spent / budget * 100) if budget else 0, 2),
+            "request_count": max(0, int(item.get("request_count", 0))),
+            "input_tokens": max(0, int(item.get("input_tokens", 0))),
+            "output_tokens": max(0, int(item.get("output_tokens", 0))),
+            "updated_at": int(item.get("updated_at", 0)) or None,
+            "budget_exhausted": bool(item.get("budget_exhausted", False)) or (budget > 0 and spent >= budget),
+            "budget_exhausted_at": int(item.get("budget_exhausted_at", 0)) or None,
+        }
+
+    # Always include the current month, even before the first successful request creates its item.
+    history_by_month[str(current_quota["month"])] = {
+        "month": current_quota["month"],
+        "monthly_budget_usd": current_quota["monthly_budget_usd"],
+        "spent_usd": current_quota["spent_usd"],
+        "remaining_usd": current_quota["remaining_usd"],
+        "used_percent": current_quota["used_percent"],
+        "request_count": current_quota["request_count"],
+        "input_tokens": current_quota["input_tokens"],
+        "output_tokens": current_quota["output_tokens"],
+        "updated_at": current_quota["updated_at"],
+        "budget_exhausted": current_quota["budget_exhausted"],
+        "budget_exhausted_at": current_quota["budget_exhausted_at"],
+    }
+    return [history_by_month[month] for month in sorted(history_by_month, reverse=True)[:limit]]
 
 
 def handle_quota(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -670,7 +831,9 @@ def handle_admin_status() -> Dict[str, Any]:
     return response(
         200,
         {
+            "proxy_version": PROXY_VERSION,
             "quota": quota,
+            "history": quota_history(quota),
             "config": {
                 "monthly_budget_usd": config["monthly_budget_usd"],
                 "input_max_tokens": config["input_max_tokens"],
@@ -685,7 +848,16 @@ def handle_admin_status() -> Dict[str, Any]:
                 {
                     "alias": alias,
                     "bedrock_model_id": model_id,
-                    "enabled": config["model_enabled"].get(alias, True),
+                    "enabled": config["model_enabled"].get(alias, True) and not quota["budget_exhausted"],
+                    "configured_enabled": config["model_enabled"].get(alias, True),
+                    "auto_disabled": config["model_enabled"].get(alias, True) and quota["budget_exhausted"],
+                    "display_name": DEFAULT_MODEL_GUIDANCE[alias]["display_name"],
+                    "description": DEFAULT_MODEL_GUIDANCE[alias]["description"],
+                    "recommended_for": DEFAULT_MODEL_GUIDANCE[alias]["recommended_for"],
+                    "context_window_tokens": DEFAULT_MODEL_GUIDANCE[alias]["context_window_tokens"],
+                    "max_output_tokens": DEFAULT_MODEL_GUIDANCE[alias]["max_output_tokens"],
+                    "input_price_per_million": DEFAULT_MODEL_PRICING[model_id]["input"],
+                    "output_price_per_million": DEFAULT_MODEL_PRICING[model_id]["output"],
                 }
                 for alias, model_id in sorted(model_map.items())
             ],
@@ -819,6 +991,7 @@ def handle_admin_config(event: Dict[str, Any]) -> Dict[str, Any]:
             ":updated_at": int(time.time()),
         },
     )
+    sync_budget_circuit(monthly_budget)
     return handle_admin_status()
 
 
@@ -837,12 +1010,14 @@ def handle_chat_completions(event: Dict[str, Any]) -> Dict[str, Any]:
         return openai_error(404, f"Model '{requested_model}' is not configured.", "invalid_request_error")
     if not config["model_enabled"].get(requested_model, True):
         return openai_error(403, f"Model '{requested_model}' is currently disabled.", "model_disabled")
+    api_key = get_api_key(event)
     model_id = model_map[requested_model]
     openai_messages = body.get("messages")
     if not isinstance(openai_messages, list):
         return openai_error(400, "Missing or invalid field: messages")
 
-    max_output_tokens = int(config["output_max_tokens"])
+    model_guidance = DEFAULT_MODEL_GUIDANCE[requested_model]
+    max_output_tokens = min(int(config["output_max_tokens"]), int(model_guidance["max_output_tokens"]))
     try:
         requested_max_tokens = int(body.get("max_tokens") or body.get("max_completion_tokens") or 1024)
     except (TypeError, ValueError):
@@ -879,14 +1054,14 @@ def handle_chat_completions(event: Dict[str, Any]) -> Dict[str, Any]:
     except ValueError as exc:
         return openai_error(400, str(exc))
     estimated_input_tokens = estimate_tokens_from_messages(openai_messages)
-    max_input_tokens = int(config["input_max_tokens"])
+    model_context_tokens = int(model_guidance["context_window_tokens"])
+    max_input_tokens = min(int(config["input_max_tokens"]), max(1, model_context_tokens - max_tokens))
     if estimated_input_tokens > max_input_tokens:
         return openai_error(
             400,
             f"Estimated input exceeds INPUT_MAX_TOKENS ({max_input_tokens}).",
             "invalid_request_error",
         )
-    api_key = get_api_key(event)
     reservation: Dict[str, Any] = {"enabled": False, "reserved_usd": 0.0}
     bedrock_completed = False
 
@@ -980,7 +1155,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         if auth_error:
             return auth_error
         if method(event) == "GET" and path == "/v1/models":
-            return handle_models()
+            return handle_models(event)
         if method(event) == "GET" and path == "/v1/quota":
             return handle_quota(event)
         if method(event) == "POST" and path == "/v1/chat/completions":
@@ -988,6 +1163,22 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return openai_error(404, f"Route not found: {method(event)} {path}")
     except json.JSONDecodeError:
         return openai_error(400, "Invalid JSON body")
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code", "Unknown")
+        if (
+            path.startswith("/admin/")
+            and getattr(exc, "operation_name", "") == "Scan"
+            and error_code in ("AccessDeniedException", "UnauthorizedOperation")
+        ):
+            print(traceback.format_exc())
+            return openai_error(
+                500,
+                "Lambda execution role cannot load monthly history. Grant dynamodb:Scan on "
+                "BedrockOpenAIProxyQuota, then refresh the dashboard.",
+                "server_error",
+            )
+        print(traceback.format_exc())
+        return openai_error(500, "AWS request failed. Check Lambda logs for details.", "server_error")
     except Exception:
         print(traceback.format_exc())
         return openai_error(500, "Proxy request failed. Check Lambda logs for details.", "server_error")

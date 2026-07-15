@@ -52,25 +52,54 @@
     .secret-result code { display:block; margin-top:8px; padding:10px; overflow-wrap:anywhere; color:#fff; background:#071c18; border-radius:8px; user-select:all; }
     .copy { padding:8px 12px; color:#d9e8fa; background:#172b43; border:1px solid #35506d; border-radius:8px; }
     .model-list { display:grid; gap:10px; margin-top:16px; }
-    .model { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:15px; align-items:center; padding:14px; background:#091524; border:1px solid #24364e; border-radius:12px; }
+    .model { padding:16px; background:#091524; border:1px solid #24364e; border-radius:12px; }
+    .model-head { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:15px; align-items:center; }
     .model strong,.model small { display:block; overflow-wrap:anywhere; }
     .model small { color:var(--muted); margin-top:5px; }
+    .model-description { margin:12px 0 0; color:#c8d5e5; font-size:14px; }
+    .model-meta { display:flex; flex-wrap:wrap; gap:7px; margin-top:11px; }
+    .chip { padding:5px 8px; color:#bcd1ea; background:#12243a; border:1px solid #29415e; border-radius:999px; font-size:12px; }
+    .setup-guide { margin-top:14px; padding:13px; background:#07111e; border:1px solid #20334a; border-radius:10px; }
+    .setup-guide h3 { margin:0 0 9px; font-size:14px; }
+    .guide-row { display:grid; grid-template-columns:120px minmax(0,1fr) auto; gap:9px; align-items:center; padding:6px 0; }
+    .guide-label { color:var(--muted); font-size:12px; }
+    .guide-value { min-width:0; overflow-wrap:anywhere; color:#dceaff; font:12px ui-monospace,SFMono-Regular,Menlo,monospace; }
+    .mini-copy { padding:5px 8px; color:#bcd8ff; background:#142840; border:1px solid #315174; border-radius:7px; font-size:11px; }
+    .guide-note { margin:8px 0 0; color:#8298b2; font-size:12px; }
+    .budget-lock { display:none; margin-top:14px; padding:12px 14px; color:#ffd7a3; background:#3b2812; border:1px solid #795320; border-radius:10px; font-size:13px; }
+    .model.auto-disabled { border-color:#80582a; opacity:.78; }
+    .status-badge { display:inline-block; margin-top:8px; padding:4px 7px; color:#ffd7a3; background:#4b3014; border:1px solid #80582a; border-radius:999px; font-size:11px; font-weight:700; }
     .switch { position:relative; width:48px; height:27px; }
     .switch input { opacity:0; width:0; height:0; }
     .slider { position:absolute; inset:0; background:#3a4759; border-radius:99px; transition:.2s; }
     .slider:before { content:""; position:absolute; width:21px; height:21px; left:3px; top:3px; border-radius:50%; background:white; transition:.2s; }
     .switch input:checked + .slider { background:#2ca77d; }
     .switch input:checked + .slider:before { transform:translateX(21px); }
+    .switch input:disabled + .slider { background:#765022; cursor:not-allowed; }
+    .history { margin-top:20px; }
+    .history .topline { align-items:center; margin-bottom:12px; }
+    .table-wrap { overflow-x:auto; border:1px solid #24364e; border-radius:12px; }
+    table { width:100%; min-width:1080px; border-collapse:collapse; background:#091524; font-size:13px; }
+    th,td { padding:12px 13px; text-align:right; white-space:nowrap; border-bottom:1px solid #20334a; }
+    th { color:#9fb4cc; background:#0c1a2a; font-size:12px; font-weight:650; }
+    th:first-child,td:first-child { text-align:left; }
+    tbody tr:last-child td { border-bottom:0; }
+    tbody tr.current-month { background:#10243d; }
+    .month-name { color:#e9f3ff; font-weight:750; }
+    .history-status { display:inline-block; padding:4px 8px; border-radius:999px; font-size:11px; font-weight:750; }
+    .history-status.current { color:#bcd8ff; background:#18365b; border:1px solid #315f91; }
+    .history-status.closed { color:#b9c8d8; background:#202f40; border:1px solid #3b4e64; }
+    .history-status.locked { color:#ffd7a3; background:#4b3014; border:1px solid #80582a; }
     footer { margin-top:20px; color:#7f93ab; font-size:13px; }
     @media(max-width:850px){ .grid{grid-template-columns:repeat(2,1fr)} .columns{grid-template-columns:1fr} }
-    @media(max-width:520px){ .grid,.credential-grid{grid-template-columns:1fr} header{align-items:flex-start} .app{width:min(100% - 22px,1180px)} }
+    @media(max-width:520px){ .grid,.credential-grid{grid-template-columns:1fr} .guide-row{grid-template-columns:1fr auto}.guide-label{grid-column:1/-1} header{align-items:flex-start} .app{width:min(100% - 22px,1180px)} }
   </style>
 </head>
 <body>
   <section id="loginPage" class="login-page">
     <form id="loginForm" class="login-card">
       <div class="brand"><div class="logo">B</div><div><h1>Bedrock Proxy Admin</h1><div class="muted">Đăng nhập để quản lý quota và model</div></div></div>
-      <label>API Gateway base URL<input id="apiUrl" type="url" required></label>
+      <label>Proxy Base URL (API Gateway hoặc Lambda URL)<input id="apiUrl" type="url" required></label>
       <label>Tên đăng nhập<input id="username" autocomplete="username" required></label>
       <label>Mật khẩu<input id="password" type="password" autocomplete="current-password" required></label>
       <button id="loginButton" class="primary" type="submit">Đăng nhập</button>
@@ -108,10 +137,21 @@
       </form>
 
       <section class="panel">
-        <h2>Danh sách model</h2><p class="muted">Tắt model để chặn request ngay tại proxy.</p>
+        <h2>Danh sách model</h2><p class="muted">Tắt model để chặn request. Mỗi model có sẵn thông tin giá và hướng dẫn cấu hình client.</p>
+        <div id="budgetLock" class="budget-lock"></div>
         <div id="modelList" class="model-list"></div>
         <div class="actions"><button id="saveModelsButton" class="save" type="button">Lưu trạng thái model</button></div>
       </section>
+    </section>
+
+    <section class="panel history">
+      <div class="topline"><div><h2>Lịch sử sử dụng theo tháng</h2><div class="muted">Dữ liệu theo tháng UTC, mới nhất trước; hiển thị tối đa 24 tháng.</div></div></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Tháng</th><th>Request</th><th>Input tokens</th><th>Output tokens</th><th>Tổng tokens</th><th>Ngân sách</th><th>Đã dùng</th><th>Còn lại</th><th>Sử dụng</th><th>Trạng thái</th></tr></thead>
+          <tbody id="historyRows"><tr><td colspan="10">Đang tải dữ liệu…</td></tr></tbody>
+        </table>
+      </div>
     </section>
 
     <form id="credentialForm" class="panel credentials">
@@ -129,7 +169,7 @@
       <div id="credentialError" class="error"></div><div id="credentialSuccess" class="success">Đã cập nhật. Các phiên admin cũ đã bị vô hiệu hóa.</div>
       <div id="newApiKeyResult" class="secret-result">Hãy sao chép API key mới ngay; hệ thống sẽ không hiển thị lại.<code id="newApiKeyValue"></code><div class="actions"><button id="copyApiKey" class="copy" type="button">Sao chép API key</button></div></div>
     </form>
-    <footer>Phiên đăng nhập chỉ lưu trong tab hiện tại và tự hết hạn.</footer>
+    <footer>Phiên đăng nhập chỉ lưu trong tab hiện tại và tự hết hạn. <span id="buildInfo">UI 2026.07.15-history-v4</span></footer>
   </main>
 
   <script>
@@ -140,6 +180,7 @@
     $('apiUrl').value = location.protocol === 'file:' ? '' : `${location.origin}${stagePath}`;
     let token = sessionStorage.getItem('bedrock_admin_token') || '';
     let baseUrl = sessionStorage.getItem('bedrock_admin_url') || $('apiUrl').value;
+    let modelBudgetLocked = false;
 
     function showError(element,error){ element.textContent=error.message||String(error); element.style.display='block'; }
     function clearMessages(){ ['loginError','saveError','saveSuccess','credentialError','credentialSuccess'].forEach(id=>$(id).style.display='none'); }
@@ -155,22 +196,61 @@
       return data;
     }
     function logout(){ token=''; sessionStorage.removeItem('bedrock_admin_token'); $('app').classList.add('hidden'); $('loginPage').classList.remove('hidden'); }
+    function guideRow(label,value,copyValue=''){
+      const row=document.createElement('div'); row.className='guide-row';
+      const name=document.createElement('span'); name.className='guide-label'; name.textContent=label;
+      const content=document.createElement('code'); content.className='guide-value'; content.textContent=value; row.append(name,content);
+      if(copyValue){ const button=document.createElement('button'); button.type='button'; button.className='mini-copy'; button.textContent='Sao chép'; button.dataset.copy=copyValue; row.append(button); }
+      return row;
+    }
+    function renderHistory(history,currentMonth){
+      const rows=(history||[]).map(item=>{
+        const row=document.createElement('tr');
+        const isCurrent=item.month===currentMonth; if(isCurrent)row.className='current-month';
+        const values=[item.month,number(item.request_count),number(item.input_tokens),number(item.output_tokens),number((item.input_tokens||0)+(item.output_tokens||0)),money(item.monthly_budget_usd),money(item.spent_usd),money(item.remaining_usd),`${item.used_percent||0}%`];
+        values.forEach((value,index)=>{ const cell=document.createElement('td'); cell.textContent=value; if(index===0)cell.className='month-name'; row.append(cell); });
+        const statusCell=document.createElement('td'); const status=document.createElement('span');
+        status.className=`history-status ${item.budget_exhausted?'locked':isCurrent?'current':'closed'}`;
+        status.textContent=item.budget_exhausted?'Hết ngân sách':isCurrent?'Tháng hiện tại':'Tháng trước';
+        statusCell.append(status); row.append(statusCell); return row;
+      });
+      if(!rows.length){ const row=document.createElement('tr'); const cell=document.createElement('td'); cell.colSpan=10; cell.textContent='Chưa có dữ liệu lịch sử.'; row.append(cell); rows.push(row); }
+      $('historyRows').replaceChildren(...rows);
+    }
     function render(data){
       const q=data.quota;
+      modelBudgetLocked=Boolean(q.budget_exhausted);
       $('month').textContent=q.month; $('budget').textContent=money(q.monthly_budget_usd); $('spent').textContent=money(q.spent_usd);
       $('remaining').textContent=money(q.remaining_usd); $('requests').textContent=number(q.request_count); $('inputTokens').textContent=number(q.input_tokens);
       $('outputTokens').textContent=number(q.output_tokens); $('totalTokens').textContent=number(q.input_tokens+q.output_tokens); $('scope').textContent=q.scope;
       $('usageBar').style.width=`${Math.min(100,Math.max(0,q.used_percent||0))}%`; $('percent').textContent=`${q.used_percent||0}% ngân sách đã dùng`;
       $('updated').textContent=q.updated_at?`Cập nhật ${new Date(q.updated_at*1000).toLocaleString('vi-VN')}`:'Chưa có request trong tháng';
+      $('budgetLock').textContent=modelBudgetLocked?'Đã kích hoạt khóa ngân sách tháng: toàn bộ model tự động tắt. Hãy tăng ngân sách lên cao hơn số tiền đã dùng để tự mở lại model, hoặc chờ sang tháng UTC mới.' : '';
+      $('budgetLock').style.display=modelBudgetLocked?'block':'none'; $('saveModelsButton').disabled=modelBudgetLocked;
+      $('buildInfo').textContent=`UI 2026.07.15-history-v4 · Backend ${data.proxy_version||'không rõ/đang dùng bản cũ'}`;
+      renderHistory(data.history||[q],q.month);
       $('monthlyBudget').value=data.config.monthly_budget_usd; $('inputLimit').value=data.config.input_max_tokens; $('outputLimit').value=data.config.output_max_tokens;
       if(data.credentials){ $('adminUsername').value=data.credentials.admin_username; $('apiKeyHint').textContent=data.credentials.api_key_hint; $('adminName').textContent=`Đăng nhập: ${data.credentials.admin_username}`; }
       $('modelList').replaceChildren(...data.models.map(model=>{
-        const row=document.createElement('div'); row.className='model';
-        const info=document.createElement('div'); const name=document.createElement('strong'); name.textContent=model.alias;
-        const id=document.createElement('small'); id.textContent=model.bedrock_model_id; info.append(name,id);
-        const label=document.createElement('label'); label.className='switch'; label.title=`Bật/tắt ${model.alias}`;
-        const checkbox=document.createElement('input'); checkbox.type='checkbox'; checkbox.checked=model.enabled; checkbox.dataset.model=model.alias;
-        const slider=document.createElement('span'); slider.className='slider'; label.append(checkbox,slider); row.append(info,label); return row;
+        const row=document.createElement('div'); row.className=`model${model.auto_disabled?' auto-disabled':''}`;
+        const head=document.createElement('div'); head.className='model-head';
+        const info=document.createElement('div'); const name=document.createElement('strong'); name.textContent=model.display_name||model.alias;
+        const alias=document.createElement('small'); alias.textContent=`Model Identifier: ${model.alias}`;
+        const id=document.createElement('small'); id.textContent=`Bedrock ID: ${model.bedrock_model_id}`; info.append(name,alias,id);
+        if(model.auto_disabled){ const badge=document.createElement('span'); badge.className='status-badge'; badge.textContent='TỰ ĐỘNG TẮT DO HẾT NGÂN SÁCH'; info.append(badge); }
+        const label=document.createElement('label'); label.className='switch'; label.title=model.auto_disabled?'Model bị khóa tự động do hết ngân sách':`Bật/tắt ${model.alias}`;
+        const checkbox=document.createElement('input'); checkbox.type='checkbox'; checkbox.checked=model.enabled; checkbox.disabled=Boolean(model.auto_disabled); checkbox.dataset.model=model.alias; checkbox.dataset.configured=String(model.configured_enabled);
+        const slider=document.createElement('span'); slider.className='slider'; label.append(checkbox,slider); head.append(info,label); row.append(head);
+        const description=document.createElement('p'); description.className='model-description'; description.textContent=model.description; row.append(description);
+        const useCase=document.createElement('p'); useCase.className='guide-note'; useCase.textContent=`Khuyến nghị: ${model.recommended_for}`; row.append(useCase);
+        const meta=document.createElement('div'); meta.className='model-meta';
+        [`Input $${model.input_price_per_million}/1M`,`Output $${model.output_price_per_million}/1M`,`Context ${number(model.context_window_tokens)}`,`Max output ${number(model.max_output_tokens)}`].forEach(text=>{ const chip=document.createElement('span'); chip.className='chip'; chip.textContent=text; meta.append(chip); }); row.append(meta);
+        const rootUrl=`${baseUrl.replace(/\/+$/,'')}/`; const openaiUrl=`${baseUrl.replace(/\/+$/,'')}/v1`;
+        const apiDisplay=`•••••••• ${data.credentials?.api_key_hint||'(API key hiện tại)'}`;
+        const guide=document.createElement('div'); guide.className='setup-guide'; const title=document.createElement('h3'); title.textContent='Cấu hình OpenAI-compatible'; guide.append(title);
+        guide.append(guideRow('Base URL',rootUrl,rootUrl),guideRow('Model Identifier',model.alias,model.alias),guideRow('API Key',apiDisplay));
+        const note=document.createElement('p'); note.className='guide-note'; note.textContent=`Nếu client không tự thêm /v1, dùng OpenAI Base URL: ${openaiUrl}`; guide.append(note); row.append(guide);
+        return row;
       }));
     }
     async function loadStatus(){ render(await api('/admin/status')); }
@@ -187,10 +267,10 @@
     $('configForm').addEventListener('submit',async event=>{
       event.preventDefault(); clearMessages(); $('saveButton').disabled=true; $('saveModelsButton').disabled=true;
       try{
-        const modelEnabled={}; document.querySelectorAll('[data-model]').forEach(input=>modelEnabled[input.dataset.model]=input.checked);
+        const modelEnabled={}; document.querySelectorAll('[data-model]').forEach(input=>{if(!input.disabled)modelEnabled[input.dataset.model]=input.checked;});
         const data=await api('/admin/config',{method:'PUT',body:JSON.stringify({monthly_budget_usd:Number($('monthlyBudget').value),input_max_tokens:Number($('inputLimit').value),output_max_tokens:Number($('outputLimit').value),model_enabled:modelEnabled})});
         render(data); $('saveSuccess').style.display='block';
-      }catch(error){showError($('saveError'),error);}finally{$('saveButton').disabled=false;$('saveModelsButton').disabled=false;}
+      }catch(error){showError($('saveError'),error);}finally{$('saveButton').disabled=false;$('saveModelsButton').disabled=modelBudgetLocked;}
     });
     $('refresh').addEventListener('click',()=>loadStatus().catch(error=>showError($('saveError'),error)));
     $('saveModelsButton').addEventListener('click',()=>$('configForm').requestSubmit());
@@ -208,6 +288,7 @@
     });
     $('generateApiKey').addEventListener('change',()=>{ $('newApiKeyInput').disabled=$('generateApiKey').checked; if($('generateApiKey').checked) $('newApiKeyInput').value=''; });
     $('copyApiKey').addEventListener('click',async()=>{ try{await navigator.clipboard.writeText($('newApiKeyValue').textContent); $('copyApiKey').textContent='Đã sao chép';}catch(error){showError($('credentialError'),new Error('Không thể tự sao chép; hãy chọn và sao chép API key thủ công.'));} });
+    $('modelList').addEventListener('click',async event=>{ const button=event.target.closest('[data-copy]'); if(!button)return; try{await navigator.clipboard.writeText(button.dataset.copy); button.textContent='Đã chép'; setTimeout(()=>button.textContent='Sao chép',1200);}catch(error){showError($('saveError'),new Error('Không thể sao chép tự động.'));} });
     $('logout').addEventListener('click',logout);
     if(token&&baseUrl){ $('adminName').textContent='Đăng nhập: admin'; $('loginPage').classList.add('hidden'); $('app').classList.remove('hidden'); loadStatus().catch(()=>logout()); }
   </script>

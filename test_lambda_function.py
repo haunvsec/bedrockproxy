@@ -34,6 +34,15 @@ class MemoryTable:
         item = self.items.get(kwargs["Key"]["quota_id"])
         return {"Item": item} if item is not None else {}
 
+    def scan(self, **kwargs):
+        return {
+            "Items": [
+                item
+                for quota_id, item in self.items.items()
+                if quota_id.startswith("global#")
+            ]
+        }
+
     def update_item(self, **kwargs):
         key = kwargs["Key"]["quota_id"]
         values = kwargs.get("ExpressionAttributeValues", {})
@@ -56,6 +65,21 @@ class MemoryTable:
                 "model_enabled": values[":models"],
                 "updated_at": values[":updated_at"],
             }
+        else:
+            item = self.items.setdefault(key, {"quota_id": key})
+            if ":true" in values:
+                item.update(
+                    {
+                        "budget_exhausted": True,
+                        "budget_exhausted_at": values[":now"],
+                        "monthly_budget_usd": values[":budget"],
+                        "updated_at": values[":now"],
+                    }
+                )
+            if "REMOVE budget_exhausted" in kwargs.get("UpdateExpression", ""):
+                item.pop("budget_exhausted", None)
+                item.pop("budget_exhausted_at", None)
+                item["monthly_budget_usd"] = values[":budget"]
         return {}
 
 
@@ -69,6 +93,24 @@ class DeniedTable(MemoryTable):
             {"Error": {"Code": "AccessDeniedException", "Message": "denied"}},
             "GetItem",
         )
+
+
+class ScanDeniedTable(MemoryTable):
+    def scan(self, **kwargs):
+        raise ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": "denied"}},
+            "Scan",
+        )
+
+
+class ReservationRejectedTable(MemoryTable):
+    def update_item(self, **kwargs):
+        if "ConditionExpression" in kwargs and kwargs["Key"]["quota_id"].startswith("global#"):
+            raise ClientError(
+                {"Error": {"Code": "ConditionalCheckFailedException", "Message": "budget"}},
+                "UpdateItem",
+            )
+        return super().update_item(**kwargs)
 
 
 class ProxyTests(unittest.TestCase):
@@ -116,6 +158,17 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(result["statusCode"], 500)
         self.assertIn("dynamodb:GetItem", json.loads(result["body"])["error"]["message"])
 
+    def test_admin_status_reports_missing_scan_permission(self):
+        memory_table = ScanDeniedTable()
+        with patch.object(proxy, "table", return_value=memory_table), patch("builtins.print"):
+            login = proxy.lambda_handler(
+                event("POST", "/admin/login", {"username": "admin", "password": "admin-password"}), None
+            )
+            token = json.loads(login["body"])["token"]
+            status = proxy.lambda_handler(event("GET", "/admin/status", token=token), None)
+        self.assertEqual(status["statusCode"], 500)
+        self.assertIn("dynamodb:Scan", json.loads(status["body"])["error"]["message"])
+
     def test_model_config_requires_real_boolean(self):
         with patch.object(proxy, "table", return_value=EmptyTable()), patch.object(
             proxy, "runtime_config", return_value=proxy.default_runtime_config()
@@ -148,7 +201,101 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(result["statusCode"], 200)
         self.assertEqual(body["config"]["monthly_budget_usd"], 35.5)
         self.assertEqual(body["config"]["input_max_tokens"], 200000)
-        self.assertFalse(body["models"][1]["enabled"])
+        models_by_alias = {model["alias"]: model for model in body["models"]}
+        self.assertFalse(models_by_alias["gpt-4o"]["enabled"])
+        self.assertEqual(models_by_alias["amazon-nova-lite"]["input_price_per_million"], 0.30)
+        self.assertEqual(models_by_alias["claude-haiku"]["output_price_per_million"], 5.00)
+
+    def test_low_cost_model_pricing(self):
+        self.assertAlmostEqual(proxy.cost_usd("global.amazon.nova-2-lite-v1:0", 1_000_000, 1_000_000), 2.80)
+        self.assertAlmostEqual(
+            proxy.cost_usd("global.anthropic.claude-haiku-4-5-20251001-v1:0", 1_000_000, 1_000_000),
+            6.00,
+        )
+
+    def test_quota_history_returns_current_and_previous_months_newest_first(self):
+        history_table = MemoryTable()
+        history_table.items["global#2026-05"] = {
+            "quota_id": "global#2026-05",
+            "month": "2026-05",
+            "monthly_budget_usd": 20,
+            "spent_usd": 3.5,
+            "request_count": 12,
+            "input_tokens": 1000,
+            "output_tokens": 200,
+        }
+        history_table.items["global#2026-06"] = {
+            "quota_id": "global#2026-06",
+            "month": "2026-06",
+            "monthly_budget_usd": 20,
+            "spent_usd": 20,
+            "request_count": 30,
+            "input_tokens": 4000,
+            "output_tokens": 800,
+        }
+        with patch.object(proxy, "table", return_value=history_table), patch.object(
+            proxy, "now_month", return_value="2026-07"
+        ):
+            current = proxy.quota_snapshot("client-secret")
+            history = proxy.quota_history(current)
+        self.assertEqual([item["month"] for item in history], ["2026-07", "2026-06", "2026-05"])
+        self.assertEqual(history[2]["request_count"], 12)
+        self.assertEqual(history[2]["input_tokens"] + history[2]["output_tokens"], 1200)
+        self.assertTrue(history[1]["budget_exhausted"])
+
+    def test_budget_rejection_automatically_disables_all_models(self):
+        budget_table = ReservationRejectedTable()
+        with patch.object(proxy, "table", return_value=budget_table):
+            with self.assertRaises(PermissionError):
+                proxy.reserve_budget(
+                    "client-secret-key-at-least-24",
+                    "global.amazon.nova-2-lite-v1:0",
+                    100,
+                    1000,
+                    20,
+                )
+            status = json.loads(proxy.handle_admin_status()["body"])
+        self.assertTrue(status["quota"]["budget_exhausted"])
+        self.assertTrue(all(not model["enabled"] for model in status["models"]))
+        self.assertTrue(all(model["auto_disabled"] for model in status["models"]))
+
+    def test_increasing_budget_clears_monthly_circuit_breaker(self):
+        budget_table = MemoryTable()
+        quota_id = proxy.quota_id_for("admin-dashboard")
+        budget_table.items[quota_id] = {
+            "quota_id": quota_id,
+            "spent_usd": 10,
+            "budget_exhausted": True,
+            "budget_exhausted_at": 1,
+        }
+        with patch.object(proxy, "table", return_value=budget_table):
+            proxy.sync_budget_circuit(20)
+        self.assertNotIn("budget_exhausted", budget_table.items[quota_id])
+
+    def test_nova_output_is_clamped_to_model_limit(self):
+        bedrock = Mock()
+        bedrock.converse.return_value = {
+            "output": {"message": {"content": [{"text": "ok"}]}},
+            "usage": {"inputTokens": 2, "outputTokens": 1, "totalTokens": 3},
+            "stopReason": "end_turn",
+        }
+        with patch.object(proxy, "runtime_config", return_value=proxy.default_runtime_config()), patch.object(
+            proxy, "reserve_budget", return_value={"enabled": False, "reserved_usd": 0.0}
+        ), patch.object(proxy, "bedrock", bedrock):
+            result = proxy.handle_chat_completions(
+                event(
+                    "POST",
+                    "/v1/chat/completions",
+                    {
+                        "model": "amazon-nova-lite",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "max_tokens": 100000,
+                    },
+                    "client-secret",
+                )
+            )
+        self.assertEqual(result["statusCode"], 200)
+        self.assertEqual(bedrock.converse.call_args.kwargs["inferenceConfig"]["maxTokens"], 64000)
 
     def test_admin_can_rotate_password_and_api_key(self):
         memory_table = MemoryTable()

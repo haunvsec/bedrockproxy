@@ -20,7 +20,7 @@ Tạo table:
 - Partition key: `quota_id` dạng `String`
 - Billing mode: On-demand
 
-Các item chính gồm `auth#credentials`, `config#proxy` và `global#YYYY-MM`. DynamoDB không cần khai báo trước các cột ngoài partition key.
+Các item chính gồm `auth#credentials`, `config#proxy` và một item usage cho mỗi tháng dạng `global#YYYY-MM`. DynamoDB không cần khai báo trước các cột ngoài partition key; các item tháng cũ chính là dữ liệu lịch sử, không cần table hoặc index mới.
 
 ## 2. Tạo Lambda function
 
@@ -65,7 +65,16 @@ API key được lưu bằng HMAC-SHA256 có domain separation. Password đượ
 
 Các cấu hình không nhạy cảm nằm ở đầu [lambda_function.py](/Volumes/DATA/openai_bedrock/lambda_function.py): region Singapore, read timeout 240 giây, table name, global quota, model map, giá token và giá trị mặc định. Ngân sách tháng, giới hạn token và trạng thái bật/tắt model chỉnh trực tiếp trên dashboard rồi lưu vào DynamoDB.
 
-Mức `$2/$10` trong `DEFAULT_MODEL_PRICING` là giá khuyến mại Claude Sonnet 5 đến hết ngày 31/08/2026. Sau đó đổi code thành `$3/$15` nếu AWS không công bố mức mới.
+Model mặc định và mức giá USD trên 1 triệu token đang cấu hình:
+
+| Model Identifier dùng với proxy | Bedrock Global Inference ID | Input | Output |
+|---|---|---:|---:|
+| `amazon-nova-lite` | `global.amazon.nova-2-lite-v1:0` | `$0.30` | `$2.50` |
+| `claude-haiku` | `global.anthropic.claude-haiku-4-5-20251001-v1:0` | `$1.00` | `$5.00` |
+| `claude-sonnet-5` | `global.anthropic.claude-sonnet-5` | `$2.00` | `$10.00` |
+| `gpt-4o` | alias tới Claude Sonnet 5 | `$2.00` | `$10.00` |
+
+Mức `$2/$10` của Claude Sonnet 5 là giá khuyến mại đến hết ngày 31/08/2026. Sau đó đổi code thành `$3/$15` nếu AWS không công bố mức mới. Luôn kiểm tra [Amazon Bedrock Pricing](https://aws.amazon.com/bedrock/pricing/) trước khi dùng production.
 
 Claude Sonnet 5 là model Sonnet mới nhất. Bedrock model ID trực tiếp là `anthropic.claude-sonnet-5`; cấu hình trên dùng Global Cross-Region Inference ID `global.anthropic.claude-sonnet-5` để Lambda tại Singapore gọi được model. Lưu ý Global Cross-Region có thể xử lý dữ liệu ngoài Singapore. Nếu bắt buộc dữ liệu chỉ nằm trong một region, cần chạy Lambda và dùng model ID trực tiếp tại region được AWS hỗ trợ, chẳng hạn `us-east-1`.
 
@@ -91,7 +100,8 @@ Gắn policy tối thiểu tương tự:
       "Effect": "Allow",
       "Action": [
         "dynamodb:UpdateItem",
-        "dynamodb:GetItem"
+        "dynamodb:GetItem",
+        "dynamodb:Scan"
       ],
       "Resource": "arn:aws:dynamodb:REGION:ACCOUNT_ID:table/BedrockOpenAIProxyQuota"
     },
@@ -188,14 +198,35 @@ https://YOUR_API_ID.execute-api.ap-southeast-1.amazonaws.com/dashboard
 Lần đầu đăng nhập với username `admin` và bootstrap `ADMIN_PASSWORD`. Dashboard cho phép:
 
 - Xem token, tiền, request và phần trăm ngân sách của tháng hiện tại.
+- Xem lịch sử tối đa 24 tháng: request, input/output/total token, ngân sách, tiền đã dùng, còn lại và trạng thái quota.
 - Thay đổi ngân sách USD/tháng.
 - Thay đổi giới hạn input/output token trên mỗi request.
 - Xem model alias và Bedrock model ID.
+- Xem giá input/output, context window, output tối đa và trường hợp sử dụng khuyến nghị của từng model.
+- Xem/copy trực tiếp Base URL và Model Identifier để cấu hình client OpenAI-compatible.
 - Bật/tắt từng model; model bị tắt sẽ trả HTTP 403 và không gọi Bedrock.
 - Đổi username/mật khẩu admin.
 - Nhập hoặc tự sinh API key mới; plaintext key chỉ hiện một lần.
 
 Session admin được ký bằng HMAC, gắn với phiên bản credential, chỉ lưu trong `sessionStorage` của tab và tự hết hạn. Khi credential đổi, session cũ bị vô hiệu hóa. Ngân sách/token/model lưu tại `config#proxy`; credential hash lưu tại `auth#credentials`; usage tháng lưu tại `global#YYYY-MM`.
+
+Dashboard dùng `dynamodb:Scan` có filter `global#` để đọc lịch sử vì table hiện chỉ có partition key. Với kiến trúc global này, mỗi tháng chỉ thêm một item nên chi phí đọc rất nhỏ. Các item tháng cũ đang còn trong table sẽ tự xuất hiện; tháng không có item hoặc item đã bị xóa thì không thể khôi phục từ dashboard.
+
+Ví dụ cấu hình client cho model giá rẻ:
+
+```text
+Base URL: https://YOUR_FUNCTION_URL.lambda-url.ap-southeast-1.on.aws/
+Model Identifier: amazon-nova-lite
+API Key: API key đang quản lý trong dashboard
+```
+
+Hoặc Claude Haiku:
+
+```text
+Model Identifier: claude-haiku
+```
+
+Nếu client yêu cầu OpenAI base URL và không tự thêm `/v1`, dùng `https://YOUR_FUNCTION_URL.lambda-url.ap-southeast-1.on.aws/v1`.
 
 Response mẫu:
 
@@ -231,6 +262,14 @@ Mỗi request dùng API key trong:
 - `x-api-key: ...`
 
 Proxy đang dùng quota global và ghi usage tháng vào item `global#YYYY-MM` trong DynamoDB.
+
+Khi một request mới làm tổng chi phí dự toán vượt phần ngân sách còn lại, proxy kích hoạt circuit-breaker tháng:
+
+- DynamoDB ghi `budget_exhausted = true` và `budget_exhausted_at` vào item `global#YYYY-MM`.
+- Toàn bộ model bị tắt ở trạng thái hiệu lực; cấu hình bật/tắt thủ công vẫn được giữ nguyên.
+- `/v1/models` không trả model đang khả dụng và chat trả HTTP `429 insufficient_quota`.
+- Tăng ngân sách trên dashboard lên cao hơn số tiền đã dùng sẽ tự xóa khóa và khôi phục các model trước đó được bật.
+- Sang tháng UTC mới, item quota mới không có khóa nên model tự hoạt động lại theo cấu hình thủ công.
 
 Trước khi gọi Bedrock, Lambda reserve chi phí tối đa ước lượng:
 

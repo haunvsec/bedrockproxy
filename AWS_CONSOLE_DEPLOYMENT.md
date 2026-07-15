@@ -50,7 +50,7 @@ Table vẫn chỉ cần partition key `quota_id`. Lambda tự thêm các thuộc
 
 - `auth#credentials`: username, password hash, API key hash, hint và phiên bản credential.
 - `config#proxy`: ngân sách, giới hạn token và trạng thái model.
-- `global#YYYY-MM`: tiền, request count, input/output token của tháng.
+- `global#YYYY-MM`: ngân sách, tiền, request count, input/output token và trạng thái quota của từng tháng. Mỗi tháng là một item riêng nên table tự lưu lịch sử.
 
 Không tạo thêm cột hoặc index trong màn hình **Create table**.
 
@@ -171,7 +171,8 @@ Role mặc định đã có quyền ghi CloudWatch Logs. Bổ sung Bedrock và D
       "Effect": "Allow",
       "Action": [
         "dynamodb:GetItem",
-        "dynamodb:UpdateItem"
+        "dynamodb:UpdateItem",
+        "dynamodb:Scan"
       ],
       "Resource": "arn:aws:dynamodb:ap-southeast-1:YOUR_ACCOUNT_ID:table/BedrockOpenAIProxyQuota"
     }
@@ -191,7 +192,8 @@ Role mặc định đã có quyền ghi CloudWatch Logs. Bổ sung Bedrock và D
 2. Vào **Model catalog**.
 3. Tìm **Claude Sonnet 5**.
 4. Mở model và hoàn tất **First Time Use (FTU)** form nếu AWS yêu cầu.
-5. Điền use case và website/project URL, chấp nhận điều khoản phù hợp.
+5. Làm tương tự với **Claude Haiku 4.5** nếu dùng alias `claude-haiku`.
+6. Điền use case và website/project URL, chấp nhận điều khoản phù hợp.
 
 Anthropic yêu cầu FTU một lần cho account hoặc AWS Organization trước lần invoke đầu tiên; AWS cho biết access được cấp ngay sau khi form hợp lệ. Xem [Request access to models](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html).
 
@@ -199,6 +201,17 @@ Proxy dùng:
 
 ```text
 global.anthropic.claude-sonnet-5
+global.anthropic.claude-haiku-4-5-20251001-v1:0
+global.amazon.nova-2-lite-v1:0
+```
+
+Các Model Identifier mà client gửi tới proxy:
+
+```text
+claude-sonnet-5
+claude-haiku
+amazon-nova-lite
+gpt-4o
 ```
 
 Lambda và endpoint vẫn ở Singapore, nhưng **Global Cross-Region Inference có thể xử lý dữ liệu ngoài Singapore**. Đây không phải cấu hình strict Singapore data residency.
@@ -365,6 +378,7 @@ INVOKE_URL/dashboard
    - Input/output/total token.
    - Số request.
    - Danh sách model.
+   - Giá input/output, context, output tối đa và hướng dẫn cấu hình client trên từng model.
 6. Thử đổi ngân sách USD/tháng và giảm output token, chọn **Lưu cấu hình**, refresh trang và kiểm tra các giá trị vẫn còn.
 7. Tắt `claude-sonnet-5`, chọn **Lưu trạng thái model**.
 8. Chạy lại event chat: phải nhận HTTP 403 và Bedrock không được gọi.
@@ -373,6 +387,41 @@ INVOKE_URL/dashboard
 11. Lưu API key được hiển thị vào password manager; key này chỉ hiện một lần.
 12. Kiểm tra key cũ trả HTTP 401 và key mới gọi được `/v1/models`.
 13. Có thể đổi username/mật khẩu admin tại cùng khu vực. Các session admin cũ sẽ bị vô hiệu hóa.
+14. Tại model `amazon-nova-lite` hoặc `claude-haiku`, kiểm tra khối **Cấu hình OpenAI-compatible** hiển thị đúng Base URL, Model Identifier và API Key dạng ẩn.
+15. Trong **Lịch sử sử dụng theo tháng**, kiểm tra tháng hiện tại và các item `global#YYYY-MM` cũ được hiển thị theo thứ tự mới nhất trước.
+
+### 9.1 Xác nhận Lambda URL đang chạy đúng phiên bản
+
+Bản dashboard mới hiển thị cuối trang:
+
+```text
+UI 2026.07.15-history-v4 · Backend 2026.07.15-history-v4
+```
+
+Nếu vẫn chỉ thấy hai model `claude-sonnet-5` và `gpt-4o`, bạn đang chạy code cũ:
+
+1. Lambda → tab **Code**: thay đúng cả `lambda_function.py` và `dashboard.html`.
+2. Chọn **Deploy**; chỉ Save file là chưa đủ.
+3. Nếu Function URL gắn với một Lambda alias/version, publish version mới và chuyển alias sang version mới. Deploy trong code editor chỉ cập nhật `$LATEST`.
+4. Mở lại Function URL với `/dashboard` và hard refresh trình duyệt.
+5. Xác nhận footer có cùng UI/Backend version như trên và danh sách có bốn Model Identifier.
+
+### 9.2 Tự động khóa model khi hết ngân sách
+
+Khi reservation của request mới làm tổng dự toán vượt ngân sách còn lại, Lambda ghi vào item tháng:
+
+```text
+budget_exhausted = true
+budget_exhausted_at = <Unix timestamp>
+```
+
+Dashboard sẽ hiển thị banner khóa ngân sách và trạng thái **TỰ ĐỘNG TẮT DO HẾT NGÂN SÁCH** trên toàn bộ model. Công tắc model bị khóa để không ghi đè cấu hình thủ công. Tăng budget lên cao hơn `spent_usd` rồi chọn **Lưu cấu hình** sẽ tự mở lại những model vốn được bật. Tháng UTC mới dùng item `global#YYYY-MM` mới nên circuit-breaker tự reset.
+
+### 9.3 Lịch sử các tháng trước
+
+Dashboard đọc tối đa 24 item tháng `global#YYYY-MM`, sắp xếp tháng mới nhất trước và hiển thị request, input/output/total token, ngân sách, đã dùng, còn lại, tỷ lệ sử dụng và trạng thái quota.
+
+Không cần thay partition key, tạo sort key, index hoặc migrate table. Các tháng cũ đang còn trong DynamoDB sẽ xuất hiện ngay sau khi deploy. Nếu một tháng chưa từng có request thành công hoặc item tháng đó đã bị xóa thì dashboard không thể tự dựng lại dữ liệu. Lambda role bắt buộc có quyền `dynamodb:Scan`; table global chỉ tăng khoảng một item mỗi tháng nên chi phí scan nhỏ.
 
 ## 10. Debug theo triệu chứng
 
@@ -383,10 +432,11 @@ INVOKE_URL/dashboard
 | Dashboard HTTP 500 | Thiếu `dashboard.html`, sai tên hoặc chưa Deploy | Lambda → Code: kiểm tra hai file ở root và chọn Deploy |
 | Login HTTP 500 | Chưa bootstrap `auth#credentials`, thiếu hash/session key hoặc key quá ngắn | Kiểm tra env và DynamoDB item `auth#credentials` |
 | Login báo role không truy cập được DynamoDB | Inline policy thiếu `GetItem`/`UpdateItem`, ARN sai account/region/table | Lambda → Configuration → Permissions → execution role → policy `BedrockOpenAIProxyAccess` |
+| Login được nhưng `/admin/status` HTTP 500 sau khi thêm lịch sử | Inline policy thiếu `dynamodb:Scan` | Thêm `dynamodb:Scan` vào policy `BedrockOpenAIProxyAccess`, lưu policy rồi thử **Làm mới** |
 | Login HTTP 401 | Sai username/password trong database | Dùng credential mới nhất đã lưu từ dashboard |
 | `/v1/*` HTTP 401 | API key sai hoặc đã được rotate | Kiểm tra header và API key mới nhất trong password manager |
 | Login/API đều lỗi sau khi đổi env key | `CREDENTIAL_HASH_KEY` không còn khớp hash trong database | Khôi phục đúng key cũ; không tự ý rotate key này |
-| `AccessDeniedException` từ DynamoDB | Role thiếu `GetItem`/`UpdateItem` hoặc ARN sai | Lambda → Permissions → role → inline policy |
+| `AccessDeniedException` từ DynamoDB | Role thiếu `GetItem`/`UpdateItem`/`Scan` hoặc ARN sai | Lambda → Permissions → role → inline policy |
 | `ResourceNotFoundException` DynamoDB | Table chưa tạo, sai tên constant hoặc tạo ở region khác | Kiểm tra constant `QUOTA_TABLE_NAME` và table phải ở Singapore |
 | `AccessDeniedException` từ Bedrock | Role thiếu `bedrock:InvokeModel`, FTU chưa hoàn tất hoặc model/region đích bị SCP chặn | Kiểm tra policy `BedrockOpenAIProxyAccess`, Bedrock Model catalog/FTU và AWS Organizations SCP |
 | `ValidationException` về model ID | Sai `DEFAULT_MODEL_MAP` hoặc profile chưa khả dụng | Dùng chính xác `global.anthropic.claude-sonnet-5`, region Singapore |
@@ -426,7 +476,7 @@ INVOKE_URL/dashboard
 - [ ] Bootstrap API key/password đủ dài; hash key và session secret khác nhau, tối thiểu 32 byte.
 - [ ] Item `auth#credentials` đã được tạo; đã xóa plaintext `API_KEY`/`ADMIN_PASSWORD` khỏi env sau khi test.
 - [ ] `CREDENTIAL_HASH_KEY` đã được sao lưu an toàn và không bị thay đổi.
-- [ ] Lambda role có Bedrock InvokeModel/InvokeModelWithResponseStream và DynamoDB GetItem/UpdateItem.
+- [ ] Lambda role có Bedrock InvokeModel/InvokeModelWithResponseStream và DynamoDB GetItem/UpdateItem/Scan.
 - [ ] Anthropic FTU đã hoàn tất.
 - [ ] Lambda Test: dashboard, login và chat đều thành công.
 - [ ] API Gateway có `$default` route, Lambda integration và `$default` auto-deploy stage.
