@@ -387,7 +387,7 @@ INVOKE_URL/dashboard
 11. Lưu API key được hiển thị vào password manager; key này chỉ hiện một lần.
 12. Kiểm tra key cũ trả HTTP 401 và key mới gọi được `/v1/models`.
 13. Có thể đổi username/mật khẩu admin tại cùng khu vực. Các session admin cũ sẽ bị vô hiệu hóa.
-14. Tại model `amazon-nova-lite` hoặc `claude-haiku`, kiểm tra khối **Cấu hình OpenAI-compatible** hiển thị đúng Base URL, Model Identifier và API Key dạng ẩn.
+14. Tại model `amazon-nova-lite` hoặc `claude-haiku`, chọn **Cấu hình client** và kiểm tra popup hiển thị đúng Base URL, Model Identifier và API Key dạng ẩn.
 15. Trong **Lịch sử sử dụng theo tháng**, kiểm tra tháng hiện tại và các item `global#YYYY-MM` cũ được hiển thị theo thứ tự mới nhất trước.
 
 ### 9.1 Xác nhận Lambda URL đang chạy đúng phiên bản
@@ -395,7 +395,7 @@ INVOKE_URL/dashboard
 Bản dashboard mới hiển thị cuối trang:
 
 ```text
-UI 2026.07.15-history-v4 · Backend 2026.07.15-history-v4
+UI 2026.07.15-modal-v5 · Backend 2026.07.15-modal-v5
 ```
 
 Nếu vẫn chỉ thấy hai model `claude-sonnet-5` và `gpt-4o`, bạn đang chạy code cũ:

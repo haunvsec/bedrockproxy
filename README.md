@@ -203,7 +203,7 @@ Lần đầu đăng nhập với username `admin` và bootstrap `ADMIN_PASSWORD`
 - Thay đổi giới hạn input/output token trên mỗi request.
 - Xem model alias và Bedrock model ID.
 - Xem giá input/output, context window, output tối đa và trường hợp sử dụng khuyến nghị của từng model.
-- Xem/copy trực tiếp Base URL và Model Identifier để cấu hình client OpenAI-compatible.
+- Mở popup **Cấu hình client** để xem/copy Base URL và Model Identifier mà không làm card model quá dài.
 - Bật/tắt từng model; model bị tắt sẽ trả HTTP 403 và không gọi Bedrock.
 - Đổi username/mật khẩu admin.
 - Nhập hoặc tự sinh API key mới; plaintext key chỉ hiện một lần.

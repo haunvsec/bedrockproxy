@@ -59,7 +59,15 @@
     .model-description { margin:12px 0 0; color:#c8d5e5; font-size:14px; }
     .model-meta { display:flex; flex-wrap:wrap; gap:7px; margin-top:11px; }
     .chip { padding:5px 8px; color:#bcd1ea; background:#12243a; border:1px solid #29415e; border-radius:999px; font-size:12px; }
-    .setup-guide { margin-top:14px; padding:13px; background:#07111e; border:1px solid #20334a; border-radius:10px; }
+    .model-actions { display:flex; justify-content:flex-end; margin-top:14px; }
+    .model-setup { padding:8px 12px; color:#cfe1f8; background:#142840; border:1px solid #315174; border-radius:8px; font-size:12px; font-weight:700; }
+    dialog { width:min(650px,calc(100% - 28px)); padding:0; color:#eef5ff; background:#0e1b2c; border:1px solid #38506d; border-radius:18px; box-shadow:0 28px 100px #000c; }
+    dialog::backdrop { background:#020814c7; backdrop-filter:blur(3px); }
+    .modal-shell { padding:22px; }
+    .modal-head { display:flex; justify-content:space-between; align-items:start; gap:18px; margin-bottom:5px; }
+    .modal-head h2 { margin:0; font-size:20px; }
+    .modal-close { width:34px; height:34px; flex:0 0 auto; padding:0; color:#c9d8e9; background:#17283d; border:1px solid #354c68; border-radius:9px; font-size:21px; line-height:1; }
+    .setup-guide { margin-top:16px; padding:14px; background:#07111e; border:1px solid #20334a; border-radius:11px; }
     .setup-guide h3 { margin:0 0 9px; font-size:14px; }
     .guide-row { display:grid; grid-template-columns:120px minmax(0,1fr) auto; gap:9px; align-items:center; padding:6px 0; }
     .guide-label { color:var(--muted); font-size:12px; }
@@ -154,6 +162,13 @@
       </div>
     </section>
 
+    <dialog id="setupDialog" aria-labelledby="setupDialogTitle">
+      <div class="modal-shell">
+        <div class="modal-head"><div><h2 id="setupDialogTitle">Cấu hình OpenAI-compatible</h2><div id="setupDialogModel" class="muted"></div></div><button id="closeSetupDialog" class="modal-close" type="button" aria-label="Đóng">×</button></div>
+        <div id="setupDialogGuide" class="setup-guide"></div>
+      </div>
+    </dialog>
+
     <form id="credentialForm" class="panel credentials">
       <h2>Tài khoản admin và API key</h2>
       <p class="muted">Thông tin xác thực được lưu dạng hash có khóa trong DynamoDB. API key hiện tại: <strong id="apiKeyHint">—</strong>. API key mới chỉ hiển thị một lần.</p>
@@ -169,7 +184,7 @@
       <div id="credentialError" class="error"></div><div id="credentialSuccess" class="success">Đã cập nhật. Các phiên admin cũ đã bị vô hiệu hóa.</div>
       <div id="newApiKeyResult" class="secret-result">Hãy sao chép API key mới ngay; hệ thống sẽ không hiển thị lại.<code id="newApiKeyValue"></code><div class="actions"><button id="copyApiKey" class="copy" type="button">Sao chép API key</button></div></div>
     </form>
-    <footer>Phiên đăng nhập chỉ lưu trong tab hiện tại và tự hết hạn. <span id="buildInfo">UI 2026.07.15-history-v4</span></footer>
+    <footer>Phiên đăng nhập chỉ lưu trong tab hiện tại và tự hết hạn. <span id="buildInfo">UI 2026.07.15-modal-v5</span></footer>
   </main>
 
   <script>
@@ -203,6 +218,14 @@
       if(copyValue){ const button=document.createElement('button'); button.type='button'; button.className='mini-copy'; button.textContent='Sao chép'; button.dataset.copy=copyValue; row.append(button); }
       return row;
     }
+    function openSetupDialog(model,credentials){
+      const rootUrl=`${baseUrl.replace(/\/+$/,'')}/`; const openaiUrl=`${baseUrl.replace(/\/+$/,'')}/v1`;
+      const apiDisplay=`•••••••• ${credentials?.api_key_hint||'(API key hiện tại)'}`;
+      $('setupDialogModel').textContent=`${model.display_name||model.alias} · ${model.alias}`;
+      const note=document.createElement('p'); note.className='guide-note'; note.textContent=`Nếu client không tự thêm /v1, dùng OpenAI Base URL: ${openaiUrl}`;
+      $('setupDialogGuide').replaceChildren(guideRow('Base URL',rootUrl,rootUrl),guideRow('Model Identifier',model.alias,model.alias),guideRow('API Key',apiDisplay),note);
+      $('setupDialog').showModal();
+    }
     function renderHistory(history,currentMonth){
       const rows=(history||[]).map(item=>{
         const row=document.createElement('tr');
@@ -227,7 +250,7 @@
       $('updated').textContent=q.updated_at?`Cập nhật ${new Date(q.updated_at*1000).toLocaleString('vi-VN')}`:'Chưa có request trong tháng';
       $('budgetLock').textContent=modelBudgetLocked?'Đã kích hoạt khóa ngân sách tháng: toàn bộ model tự động tắt. Hãy tăng ngân sách lên cao hơn số tiền đã dùng để tự mở lại model, hoặc chờ sang tháng UTC mới.' : '';
       $('budgetLock').style.display=modelBudgetLocked?'block':'none'; $('saveModelsButton').disabled=modelBudgetLocked;
-      $('buildInfo').textContent=`UI 2026.07.15-history-v4 · Backend ${data.proxy_version||'không rõ/đang dùng bản cũ'}`;
+      $('buildInfo').textContent=`UI 2026.07.15-modal-v5 · Backend ${data.proxy_version||'không rõ/đang dùng bản cũ'}`;
       renderHistory(data.history||[q],q.month);
       $('monthlyBudget').value=data.config.monthly_budget_usd; $('inputLimit').value=data.config.input_max_tokens; $('outputLimit').value=data.config.output_max_tokens;
       if(data.credentials){ $('adminUsername').value=data.credentials.admin_username; $('apiKeyHint').textContent=data.credentials.api_key_hint; $('adminName').textContent=`Đăng nhập: ${data.credentials.admin_username}`; }
@@ -245,11 +268,7 @@
         const useCase=document.createElement('p'); useCase.className='guide-note'; useCase.textContent=`Khuyến nghị: ${model.recommended_for}`; row.append(useCase);
         const meta=document.createElement('div'); meta.className='model-meta';
         [`Input $${model.input_price_per_million}/1M`,`Output $${model.output_price_per_million}/1M`,`Context ${number(model.context_window_tokens)}`,`Max output ${number(model.max_output_tokens)}`].forEach(text=>{ const chip=document.createElement('span'); chip.className='chip'; chip.textContent=text; meta.append(chip); }); row.append(meta);
-        const rootUrl=`${baseUrl.replace(/\/+$/,'')}/`; const openaiUrl=`${baseUrl.replace(/\/+$/,'')}/v1`;
-        const apiDisplay=`•••••••• ${data.credentials?.api_key_hint||'(API key hiện tại)'}`;
-        const guide=document.createElement('div'); guide.className='setup-guide'; const title=document.createElement('h3'); title.textContent='Cấu hình OpenAI-compatible'; guide.append(title);
-        guide.append(guideRow('Base URL',rootUrl,rootUrl),guideRow('Model Identifier',model.alias,model.alias),guideRow('API Key',apiDisplay));
-        const note=document.createElement('p'); note.className='guide-note'; note.textContent=`Nếu client không tự thêm /v1, dùng OpenAI Base URL: ${openaiUrl}`; guide.append(note); row.append(guide);
+        const actions=document.createElement('div'); actions.className='model-actions'; const setupButton=document.createElement('button'); setupButton.type='button'; setupButton.className='model-setup'; setupButton.textContent='Cấu hình client'; setupButton.addEventListener('click',()=>openSetupDialog(model,data.credentials)); actions.append(setupButton); row.append(actions);
         return row;
       }));
     }
@@ -288,7 +307,10 @@
     });
     $('generateApiKey').addEventListener('change',()=>{ $('newApiKeyInput').disabled=$('generateApiKey').checked; if($('generateApiKey').checked) $('newApiKeyInput').value=''; });
     $('copyApiKey').addEventListener('click',async()=>{ try{await navigator.clipboard.writeText($('newApiKeyValue').textContent); $('copyApiKey').textContent='Đã sao chép';}catch(error){showError($('credentialError'),new Error('Không thể tự sao chép; hãy chọn và sao chép API key thủ công.'));} });
-    $('modelList').addEventListener('click',async event=>{ const button=event.target.closest('[data-copy]'); if(!button)return; try{await navigator.clipboard.writeText(button.dataset.copy); button.textContent='Đã chép'; setTimeout(()=>button.textContent='Sao chép',1200);}catch(error){showError($('saveError'),new Error('Không thể sao chép tự động.'));} });
+    document.addEventListener('click',async event=>{ const button=event.target.closest('[data-copy]'); if(!button)return; try{await navigator.clipboard.writeText(button.dataset.copy); button.textContent='Đã chép'; setTimeout(()=>button.textContent='Sao chép',1200);}catch(error){showError($('saveError'),new Error('Không thể sao chép tự động.'));} });
+    $('closeSetupDialog').addEventListener('click',()=>$('setupDialog').close());
+    $('setupDialog').addEventListener('click',event=>{ if(event.target===$('setupDialog'))$('setupDialog').close(); });
+    document.addEventListener('keydown',event=>{ if(event.key==='Escape'&&$('setupDialog').open)$('setupDialog').close(); });
     $('logout').addEventListener('click',logout);
     if(token&&baseUrl){ $('adminName').textContent='Đăng nhập: admin'; $('loginPage').classList.add('hidden'); $('app').classList.remove('hidden'); loadStatus().catch(()=>logout()); }
   </script>
