@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Bedrock Proxy Admin</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; --bg:#07111f; --panel:#101d2e; --line:#293b54; --muted:#99abc1; --blue:#3985f7; }
+    * { box-sizing: border-box; }
+    body { margin:0; min-height:100vh; background:radial-gradient(circle at 15% 0,#132d4d 0,transparent 35%),var(--bg); color:#eef5ff; }
+    button,input { font:inherit; }
+    button { cursor:pointer; }
+    .hidden { display:none!important; }
+    .login-page { min-height:100vh; display:grid; place-items:center; padding:20px; }
+    .login-card { width:min(430px,100%); padding:30px; background:#0e1b2c; border:1px solid var(--line); border-radius:20px; box-shadow:0 24px 80px #0008; }
+    .brand { display:flex; gap:12px; align-items:center; margin-bottom:24px; }
+    .logo { width:44px; height:44px; display:grid; place-items:center; border-radius:13px; background:linear-gradient(135deg,#448cf7,#35d5aa); color:#06111d; font-weight:900; }
+    h1,h2,p { margin-top:0; }
+    h1 { font-size:24px; margin-bottom:4px; }
+    .muted { color:var(--muted); }
+    label { display:grid; gap:7px; color:#b7c5d7; font-size:13px; margin-top:14px; }
+    input { width:100%; padding:12px 13px; color:#eef5ff; background:#081422; border:1px solid #344a66; border-radius:10px; outline:none; }
+    input:focus { border-color:#65a4ff; box-shadow:0 0 0 3px #3985f722; }
+    .primary { width:100%; margin-top:20px; padding:12px 16px; border:0; border-radius:10px; background:var(--blue); color:white; font-weight:750; }
+    button:disabled { opacity:.55; cursor:wait; }
+    .error,.success { display:none; padding:11px 13px; border-radius:10px; margin-top:14px; }
+    .error { color:#ffc4c4; background:#421f2b; border:1px solid #753245; }
+    .success { color:#bdf7dd; background:#123b32; border:1px solid #236b57; }
+    .app { width:min(1180px,calc(100% - 32px)); margin:auto; padding:28px 0 50px; }
+    header { display:flex; justify-content:space-between; align-items:center; gap:18px; margin-bottom:24px; }
+    header .brand { margin:0; }
+    .logout { padding:9px 13px; color:#d6e2f1; background:#15243a; border:1px solid var(--line); border-radius:9px; }
+    .topline { display:flex; justify-content:space-between; gap:16px; align-items:end; margin-bottom:14px; }
+    .topline h2 { margin-bottom:3px; }
+    .refresh { color:#aecdff; background:transparent; border:0; }
+    .grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; }
+    .card,.panel { background:linear-gradient(160deg,#122137,#0d1929); border:1px solid var(--line); border-radius:16px; }
+    .card { padding:18px; }
+    .card .value { margin-top:8px; font-size:27px; font-weight:800; overflow-wrap:anywhere; }
+    .bar { height:11px; margin:17px 0 8px; overflow:hidden; border-radius:99px; background:#28394f; }
+    .bar div { width:0; height:100%; background:linear-gradient(90deg,#3985f7,#35d5aa); transition:width .3s; }
+    .columns { display:grid; grid-template-columns:minmax(0,.9fr) minmax(0,1.35fr); gap:18px; margin-top:20px; }
+    .panel { padding:20px; }
+    .panel h2 { font-size:19px; margin-bottom:5px; }
+    .actions { display:flex; justify-content:flex-end; gap:10px; margin-top:20px; }
+    .save { padding:10px 18px; border:0; border-radius:9px; color:white; background:var(--blue); font-weight:700; }
+    .model-list { display:grid; gap:10px; margin-top:16px; }
+    .model { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:15px; align-items:center; padding:14px; background:#091524; border:1px solid #24364e; border-radius:12px; }
+    .model strong,.model small { display:block; overflow-wrap:anywhere; }
+    .model small { color:var(--muted); margin-top:5px; }
+    .switch { position:relative; width:48px; height:27px; }
+    .switch input { opacity:0; width:0; height:0; }
+    .slider { position:absolute; inset:0; background:#3a4759; border-radius:99px; transition:.2s; }
+    .slider:before { content:""; position:absolute; width:21px; height:21px; left:3px; top:3px; border-radius:50%; background:white; transition:.2s; }
+    .switch input:checked + .slider { background:#2ca77d; }
+    .switch input:checked + .slider:before { transform:translateX(21px); }
+    footer { margin-top:20px; color:#7f93ab; font-size:13px; }
+    @media(max-width:850px){ .grid{grid-template-columns:repeat(2,1fr)} .columns{grid-template-columns:1fr} }
+    @media(max-width:520px){ .grid{grid-template-columns:1fr} header{align-items:flex-start} .app{width:min(100% - 22px,1180px)} }
+  </style>
+</head>
+<body>
+  <section id="loginPage" class="login-page">
+    <form id="loginForm" class="login-card">
+      <div class="brand"><div class="logo">B</div><div><h1>Bedrock Proxy Admin</h1><div class="muted">Đăng nhập để quản lý quota và model</div></div></div>
+      <label>API Gateway base URL<input id="apiUrl" type="url" required></label>
+      <label>Tên đăng nhập<input id="username" autocomplete="username" required></label>
+      <label>Mật khẩu<input id="password" type="password" autocomplete="current-password" required></label>
+      <button id="loginButton" class="primary" type="submit">Đăng nhập</button>
+      <div id="loginError" class="error"></div>
+    </form>
+  </section>
+
+  <main id="app" class="app hidden">
+    <header>
+      <div class="brand"><div class="logo">B</div><div><h1>Bedrock Proxy</h1><div id="adminName" class="muted"></div></div></div>
+      <button id="logout" class="logout">Đăng xuất</button>
+    </header>
+
+    <div class="topline"><div><h2>Thống kê tháng <span id="month">—</span></h2><div id="updated" class="muted">Đang tải dữ liệu…</div></div><button id="refresh" class="refresh">↻ Làm mới</button></div>
+    <section class="grid">
+      <div class="card"><div class="muted">Ngân sách</div><div id="budget" class="value">—</div></div>
+      <div class="card"><div class="muted">Đã sử dụng</div><div id="spent" class="value">—</div></div>
+      <div class="card"><div class="muted">Còn lại</div><div id="remaining" class="value">—</div></div>
+      <div class="card"><div class="muted">Số request</div><div id="requests" class="value">—</div></div>
+      <div class="card"><div class="muted">Input tokens</div><div id="inputTokens" class="value">—</div></div>
+      <div class="card"><div class="muted">Output tokens</div><div id="outputTokens" class="value">—</div></div>
+      <div class="card"><div class="muted">Tổng tokens</div><div id="totalTokens" class="value">—</div></div>
+      <div class="card"><div class="muted">Quota scope</div><div id="scope" class="value">—</div></div>
+    </section>
+    <div class="bar"><div id="usageBar"></div></div><div id="percent" class="muted">0% ngân sách đã dùng</div>
+
+    <section class="columns">
+      <form id="configForm" class="panel">
+        <h2>Giới hạn chi phí và token</h2><p class="muted">Áp dụng cho mọi request mới.</p>
+        <label>Ngân sách USD / tháng<input id="monthlyBudget" type="number" min="0.01" max="1000000" step="0.01" required></label>
+        <label>Input token tối đa / request<input id="inputLimit" type="number" min="1" max="1000000" required></label>
+        <label>Output token tối đa / request<input id="outputLimit" type="number" min="1" max="128000" required></label>
+        <div class="actions"><button id="saveButton" class="save" type="submit">Lưu cấu hình</button></div>
+        <div id="saveError" class="error"></div><div id="saveSuccess" class="success">Đã lưu cấu hình.</div>
+      </form>
+
+      <section class="panel">
+        <h2>Danh sách model</h2><p class="muted">Tắt model để chặn request ngay tại proxy.</p>
+        <div id="modelList" class="model-list"></div>
+        <div class="actions"><button id="saveModelsButton" class="save" type="button">Lưu trạng thái model</button></div>
+      </section>
+    </section>
+    <footer>Phiên đăng nhập chỉ lưu trong tab hiện tại và tự hết hạn.</footer>
+  </main>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    const money = value => new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:6}).format(value||0);
+    const number = value => new Intl.NumberFormat('vi-VN').format(value||0);
+    const stagePath = location.protocol === 'file:' ? '' : location.pathname.replace(/\/dashboard(?:\.html)?\/?$/, '');
+    $('apiUrl').value = location.protocol === 'file:' ? '' : `${location.origin}${stagePath}`;
+    let token = sessionStorage.getItem('bedrock_admin_token') || '';
+    let baseUrl = sessionStorage.getItem('bedrock_admin_url') || $('apiUrl').value;
+
+    function showError(element,error){ element.textContent=error.message||String(error); element.style.display='block'; }
+    function clearMessages(){ ['loginError','saveError','saveSuccess'].forEach(id=>$(id).style.display='none'); }
+    async function api(path,options={}){
+      const headers={'content-type':'application/json',...(options.headers||{})};
+      if(token) headers.authorization=`Bearer ${token}`;
+      const result=await fetch(`${baseUrl}${path}`,{...options,headers});
+      const data=await result.json().catch(()=>({}));
+      if(!result.ok){
+        if(result.status===401 && path!=='/admin/login') logout();
+        throw new Error(data.error?.message||`HTTP ${result.status}`);
+      }
+      return data;
+    }
+    function logout(){ token=''; sessionStorage.removeItem('bedrock_admin_token'); $('app').classList.add('hidden'); $('loginPage').classList.remove('hidden'); }
+    function render(data){
+      const q=data.quota;
+      $('month').textContent=q.month; $('budget').textContent=money(q.monthly_budget_usd); $('spent').textContent=money(q.spent_usd);
+      $('remaining').textContent=money(q.remaining_usd); $('requests').textContent=number(q.request_count); $('inputTokens').textContent=number(q.input_tokens);
+      $('outputTokens').textContent=number(q.output_tokens); $('totalTokens').textContent=number(q.input_tokens+q.output_tokens); $('scope').textContent=q.scope;
+      $('usageBar').style.width=`${Math.min(100,Math.max(0,q.used_percent||0))}%`; $('percent').textContent=`${q.used_percent||0}% ngân sách đã dùng`;
+      $('updated').textContent=q.updated_at?`Cập nhật ${new Date(q.updated_at*1000).toLocaleString('vi-VN')}`:'Chưa có request trong tháng';
+      $('monthlyBudget').value=data.config.monthly_budget_usd; $('inputLimit').value=data.config.input_max_tokens; $('outputLimit').value=data.config.output_max_tokens;
+      $('modelList').replaceChildren(...data.models.map(model=>{
+        const row=document.createElement('div'); row.className='model';
+        const info=document.createElement('div'); const name=document.createElement('strong'); name.textContent=model.alias;
+        const id=document.createElement('small'); id.textContent=model.bedrock_model_id; info.append(name,id);
+        const label=document.createElement('label'); label.className='switch'; label.title=`Bật/tắt ${model.alias}`;
+        const checkbox=document.createElement('input'); checkbox.type='checkbox'; checkbox.checked=model.enabled; checkbox.dataset.model=model.alias;
+        const slider=document.createElement('span'); slider.className='slider'; label.append(checkbox,slider); row.append(info,label); return row;
+      }));
+    }
+    async function loadStatus(){ render(await api('/admin/status')); }
+
+    $('loginForm').addEventListener('submit',async event=>{
+      event.preventDefault(); clearMessages(); $('loginButton').disabled=true;
+      try{
+        baseUrl=$('apiUrl').value.trim().replace(/\/+$/,''); token='';
+        const data=await api('/admin/login',{method:'POST',body:JSON.stringify({username:$('username').value,password:$('password').value})});
+        token=data.token; sessionStorage.setItem('bedrock_admin_token',token); sessionStorage.setItem('bedrock_admin_url',baseUrl);
+        $('adminName').textContent=`Đăng nhập: ${data.username}`; $('password').value=''; $('loginPage').classList.add('hidden'); $('app').classList.remove('hidden'); await loadStatus();
+      }catch(error){ logout(); showError($('loginError'),error); }finally{$('loginButton').disabled=false;}
+    });
+    $('configForm').addEventListener('submit',async event=>{
+      event.preventDefault(); clearMessages(); $('saveButton').disabled=true; $('saveModelsButton').disabled=true;
+      try{
+        const modelEnabled={}; document.querySelectorAll('[data-model]').forEach(input=>modelEnabled[input.dataset.model]=input.checked);
+        const data=await api('/admin/config',{method:'PUT',body:JSON.stringify({monthly_budget_usd:Number($('monthlyBudget').value),input_max_tokens:Number($('inputLimit').value),output_max_tokens:Number($('outputLimit').value),model_enabled:modelEnabled})});
+        render(data); $('saveSuccess').style.display='block';
+      }catch(error){showError($('saveError'),error);}finally{$('saveButton').disabled=false;$('saveModelsButton').disabled=false;}
+    });
+    $('refresh').addEventListener('click',()=>loadStatus().catch(error=>showError($('saveError'),error)));
+    $('saveModelsButton').addEventListener('click',()=>$('configForm').requestSubmit());
+    $('logout').addEventListener('click',logout);
+    if(token&&baseUrl){ $('adminName').textContent='Đăng nhập: admin'; $('loginPage').classList.add('hidden'); $('app').classList.remove('hidden'); loadStatus().catch(()=>logout()); }
+  </script>
+</body>
+</html>

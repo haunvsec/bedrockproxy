@@ -1,0 +1,400 @@
+# Triển khai Bedrock OpenAI Proxy hoàn toàn bằng AWS Console
+
+Tài liệu này dùng **chỉ giao diện web AWS Console**, không cần AWS CLI, SAM, CDK hay Terraform. Các bước được viết cho region Singapore `ap-southeast-1` và HTTP API Gateway.
+
+## 0. Kết quả sau khi triển khai
+
+Bạn sẽ có:
+
+- Một Lambda chạy proxy OpenAI-compatible và phục vụ dashboard HTML.
+- Một DynamoDB On-Demand lưu quota tháng và cấu hình bật/tắt model.
+- Một HTTP API Gateway public HTTPS.
+- Xác thực API client bằng API key riêng.
+- Đăng nhập dashboard bằng tài khoản admin riêng.
+- Claude Sonnet 5 qua Global Cross-Region Inference từ Singapore.
+
+Các file cần dùng:
+
+- [lambda_function.py](/Volumes/DATA/openai_bedrock/lambda_function.py)
+- [dashboard.html](/Volumes/DATA/openai_bedrock/dashboard.html)
+
+## 1. Chọn Singapore
+
+1. Đăng nhập [AWS Management Console](https://console.aws.amazon.com/).
+2. Trên thanh trên cùng, mở region selector.
+3. Chọn **Asia Pacific (Singapore) — ap-southeast-1**.
+4. Giữ nguyên region này khi tạo DynamoDB, Lambda và API Gateway.
+
+## 2. Tạo DynamoDB
+
+1. Mở **DynamoDB** trong AWS Console.
+2. Chọn **Tables → Create table**.
+3. Nhập:
+   - **Table name:** `BedrockOpenAIProxyQuota`
+   - **Partition key:** `quota_id`
+   - **Data type:** `String`
+4. Không tạo sort key.
+5. Trong **Table settings**, chọn **Customize settings** nếu cần và đặt capacity là **On-demand**.
+6. Giữ encryption mặc định **AWS owned key**.
+7. Không cần secondary index, DynamoDB Streams, Global Tables, PITR hoặc backup cho bản proxy nhỏ này.
+8. Chọn **Create table** và chờ status thành **Active**.
+9. Mở tab **General information/Overview**, lưu lại Table ARN. ARN có dạng:
+
+```text
+arn:aws:dynamodb:ap-southeast-1:YOUR_ACCOUNT_ID:table/BedrockOpenAIProxyQuota
+```
+
+DynamoDB On-Demand tính phí theo request và không cần chạy database server. Xem [DynamoDB table operations](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/WorkingWithTables.Basics.html).
+
+## 3. Tạo Lambda
+
+1. Mở **Lambda → Functions → Create function**.
+2. Chọn **Author from scratch**.
+3. Điền:
+   - **Function name:** `bedrock-openai-proxy`
+   - **Runtime:** Python 3.12
+   - **Architecture:** arm64 hoặc x86_64; cả hai đều dùng được vì project không có binary dependency.
+4. Trong **Permissions**, chọn **Create a new role with basic Lambda permissions**.
+5. Chọn **Create function**.
+
+Lambda console hỗ trợ chỉnh Python và thêm nhiều file trực tiếp trong code editor. Tham khảo [AWS Lambda ZIP/code editor](https://docs.aws.amazon.com/lambda/latest/dg/configuration-function-zip.html).
+
+### 3.1 Dán source bằng code editor
+
+1. Trong function vừa tạo, mở tab **Code**.
+2. Trong cây file bên trái, mở `lambda_function.py`.
+3. Xóa code Hello World và dán toàn bộ nội dung file [lambda_function.py](/Volumes/DATA/openai_bedrock/lambda_function.py).
+4. Trong file explorer của code editor, chọn biểu tượng **New file**.
+5. Đặt tên chính xác `dashboard.html`.
+6. Dán toàn bộ nội dung file [dashboard.html](/Volumes/DATA/openai_bedrock/dashboard.html).
+7. Chọn **Deploy**. Chỉ Save file mà chưa Deploy thì Lambda vẫn chạy version code cũ.
+
+Hai file phải nằm ở root của deployment package:
+
+```text
+lambda_function.py
+dashboard.html
+```
+
+### 3.2 Kiểm tra handler
+
+1. Trong tab **Code**, kéo xuống **Runtime settings**.
+2. Chọn **Edit**.
+3. Handler phải là:
+
+```text
+lambda_function.lambda_handler
+```
+
+4. Chọn **Save**.
+
+Quy tắc đặt handler được mô tả tại [Python Lambda handler](https://docs.aws.amazon.com/lambda/latest/dg/python-handler.html).
+
+### 3.3 Cấu hình memory và timeout
+
+1. Mở **Configuration → General configuration → Edit**.
+2. Đặt:
+   - **Memory:** `512 MB`
+   - **Timeout:** `5 min 0 sec`
+3. Chọn **Save**.
+
+Lambda cho phép timeout tối đa 900 giây (15 phút). Hướng dẫn này dùng 300 giây để Bedrock có thời gian hoàn tất và Lambda ghi nhận quota. Xem [Configure Lambda timeout](https://docs.aws.amazon.com/lambda/latest/dg/configuration-timeout.html).
+
+Lưu ý: HTTP API Gateway có integration timeout tối đa 30 giây và không tăng được. Lambda timeout 5 phút giúp Lambda hoàn tất xử lý/ghi quota nếu API Gateway đã timeout, nhưng client vẫn có thể nhận `504` nếu model trả lời quá 30 giây. Xem [HTTP API quotas](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-quotas.html).
+
+## 4. Environment variables
+
+1. Mở **Configuration → Environment variables → Edit**.
+2. Chọn **Add environment variable** cho từng dòng dưới đây.
+3. Chỉ thêm ba secret dưới đây; thay giá trị mẫu bằng chuỗi ngẫu nhiên mạnh do password manager tạo.
+
+| Key | Value mẫu |
+|---|---|
+| `API_KEY` | `client-key-ngau-nhien-rat-dai` |
+| `ADMIN_PASSWORD` | `mat-khau-admin-ngau-nhien-rat-dai` |
+| `ADMIN_SESSION_SECRET` | `chuoi-ngau-nhien-it-nhat-32-ky-tu` |
+
+4. Chọn **Save**.
+
+Username dashboard cố định là `admin`. Session mặc định 8 giờ. Không thêm `AWS_REGION`; Lambda tự tạo biến này và không cho phép override.
+
+Region, Bedrock timeout, DynamoDB table, model map, quota scope và giá token được đặt bằng constants ở đầu `lambda_function.py`. Ngân sách USD/tháng, input/output token limit và trạng thái model chỉnh trong dashboard, sau đó được lưu tại item `config#proxy` trong DynamoDB.
+
+Giá `$2/$10` trên một triệu input/output token là giá khuyến mại Claude Sonnet 5 đến hết **31/08/2026**. Từ **01/09/2026**, theo công bố hiện tại của AWS, đổi thành:
+
+```text
+DEFAULT_MODEL_PRICING = {
+    "global.anthropic.claude-sonnet-5": {"input": 3.00, "output": 15.00}
+}
+```
+
+Luôn kiểm tra [Amazon Bedrock Pricing](https://aws.amazon.com/bedrock/pricing/) trước khi dùng production.
+
+## 5. Cấp IAM permission cho Lambda
+
+Role mặc định đã có quyền ghi CloudWatch Logs. Bổ sung Bedrock và DynamoDB:
+
+1. Trong Lambda, mở **Configuration → Permissions**.
+2. Trong **Execution role**, chọn link tên role. AWS mở IAM console.
+3. Chọn **Add permissions → Create inline policy**.
+4. Chọn tab **JSON**.
+5. Dán policy dưới đây; thay `YOUR_ACCOUNT_ID` bằng Account ID của bạn:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "InvokeBedrockModels",
+      "Effect": "Allow",
+      "Action": "bedrock:InvokeModel",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadWriteProxyQuota",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:UpdateItem"
+      ],
+      "Resource": "arn:aws:dynamodb:ap-southeast-1:YOUR_ACCOUNT_ID:table/BedrockOpenAIProxyQuota"
+    }
+  ]
+}
+```
+
+6. Chọn **Next**.
+7. Policy name: `BedrockOpenAIProxyAccess`.
+8. Chọn **Create policy**.
+
+`Resource: "*"` cho Bedrock được dùng để tránh thiếu quyền với Global Cross-Region Inference Profile và các model đích. Sau khi chạy ổn, có thể siết ARN theo chính sách của tổ chức.
+
+## 6. Hoàn tất quyền dùng Claude Sonnet 5
+
+1. Mở **Amazon Bedrock** trong Singapore.
+2. Vào **Model catalog**.
+3. Tìm **Claude Sonnet 5**.
+4. Mở model và hoàn tất **First Time Use (FTU)** form nếu AWS yêu cầu.
+5. Điền use case và website/project URL, chấp nhận điều khoản phù hợp.
+
+Anthropic yêu cầu FTU một lần cho account hoặc AWS Organization trước lần invoke đầu tiên; AWS cho biết access được cấp ngay sau khi form hợp lệ. Xem [Request access to models](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html).
+
+Proxy dùng:
+
+```text
+global.anthropic.claude-sonnet-5
+```
+
+Lambda và endpoint vẫn ở Singapore, nhưng **Global Cross-Region Inference có thể xử lý dữ liệu ngoài Singapore**. Đây không phải cấu hình strict Singapore data residency.
+
+## 7. Test Lambda ngay trong Console
+
+Nên test Lambda trước khi tạo API Gateway để tách lỗi backend khỏi lỗi routing.
+
+### 7.1 Test dashboard file
+
+1. Trong Lambda, mở tab **Test**.
+2. Chọn **Create new event**.
+3. Event name: `DashboardGet`.
+4. Dán:
+
+```json
+{
+  "version": "2.0",
+  "rawPath": "/dashboard",
+  "requestContext": {
+    "http": {
+      "method": "GET",
+      "path": "/dashboard"
+    }
+  }
+}
+```
+
+5. Chọn **Save**, sau đó **Test**.
+6. Kết quả đúng có `statusCode: 200`, header `content-type: text/html` và body bắt đầu bằng `<!doctype html>`.
+
+Nếu nhận `500`, mở log output. Lỗi thường gặp nhất là chưa tạo `dashboard.html`, sai tên file, hoặc chưa bấm Deploy.
+
+### 7.2 Test đăng nhập admin
+
+Tạo event `AdminLogin`, thay password đúng với environment variable:
+
+```json
+{
+  "version": "2.0",
+  "rawPath": "/admin/login",
+  "headers": {
+    "content-type": "application/json"
+  },
+  "requestContext": {
+    "http": {
+      "method": "POST",
+      "path": "/admin/login"
+    }
+  },
+  "body": "{\"username\":\"admin\",\"password\":\"MAT_KHAU_ADMIN_CUA_BAN\"}",
+  "isBase64Encoded": false
+}
+```
+
+Kết quả đúng là HTTP 200 và có `token`. HTTP 401 nghĩa là sai username/password. HTTP 500 về admin configuration thường là thiếu một trong ba biến admin hoặc `ADMIN_SESSION_SECRET` ngắn hơn 32 byte.
+
+### 7.3 Test chat, DynamoDB và Bedrock cùng lúc
+
+Tạo event `ChatCompletion`, thay `YOUR_CLIENT_API_KEY` bằng `API_KEY`:
+
+```json
+{
+  "version": "2.0",
+  "rawPath": "/v1/chat/completions",
+  "headers": {
+    "content-type": "application/json",
+    "authorization": "Bearer YOUR_CLIENT_API_KEY"
+  },
+  "requestContext": {
+    "http": {
+      "method": "POST",
+      "path": "/v1/chat/completions"
+    }
+  },
+  "body": "{\"model\":\"claude-sonnet-5\",\"messages\":[{\"role\":\"user\",\"content\":\"Tra loi dung mot tu: OK\"}],\"max_tokens\":20}",
+  "isBase64Encoded": false
+}
+```
+
+Kết quả đúng:
+
+- `statusCode: 200`.
+- Body có `choices`, `usage.prompt_tokens`, `usage.completion_tokens`.
+- DynamoDB xuất hiện item `global#YYYY-MM`.
+
+## 8. Tạo HTTP API Gateway
+
+1. Mở **API Gateway → APIs → Create API**.
+2. Tại **HTTP API**, chọn **Build**. Không chọn REST API hoặc WebSocket API.
+3. Chọn **Add integration → Lambda**.
+4. Chọn region Singapore và function `bedrock-openai-proxy`.
+5. API name: `bedrock-openai-proxy-api`.
+6. Hoàn tất wizard bằng **Review and create → Create**.
+
+AWS mô tả luồng console tại [Create an HTTP API](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop.html), và Lambda proxy integration mặc định dùng payload format mới nhất trong console tại [HTTP API Lambda integration](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop-integrations-lambda.html).
+
+### 8.1 Dùng một `$default` route
+
+Code Lambda đã tự route theo path, nên chỉ cần một catch-all route:
+
+1. Trong HTTP API vừa tạo, mở **Routes**.
+2. Chọn **Create**.
+3. Route key chọn/nhập **`$default`**.
+4. Chọn **Create**.
+5. Chọn route `$default`, chọn **Attach integration**.
+6. Chọn Lambda integration trỏ tới `bedrock-openai-proxy`.
+7. Nếu wizard đã tạo route thừa theo tên function, có thể xóa route đó sau khi `$default` hoạt động.
+
+`$default` bắt mọi method/path chưa có route cụ thể. Xem [HTTP API routes](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop-routes.html).
+
+### 8.2 Stage
+
+1. Mở **Stages**.
+2. Dùng stage **`$default`**.
+3. Bật **Auto-deploy**.
+4. Lưu thay đổi nếu console yêu cầu.
+
+Với `$default` stage, dashboard URL không có `/prod`:
+
+```text
+https://API_ID.execute-api.ap-southeast-1.amazonaws.com/dashboard
+```
+
+### 8.3 CORS
+
+Dashboard được Lambda phục vụ cùng origin với API nên **không bắt buộc cấu hình CORS trong API Gateway**.
+
+Chỉ khi gọi API từ một website domain khác, vào **CORS → Configure** và thêm:
+
+- Allow origins: domain web cụ thể; tạm thời có thể dùng `*`.
+- Allow headers: `authorization`, `content-type`, `x-api-key`.
+- Allow methods: `GET`, `POST`, `PUT`, `OPTIONS`.
+
+Khi bật CORS tại HTTP API, API Gateway sẽ bỏ qua CORS headers từ Lambda và dùng cấu hình của API Gateway. Xem [HTTP API CORS](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-cors.html).
+
+## 9. Kiểm tra dashboard thật
+
+1. Trong API Gateway, copy **Invoke URL**.
+2. Mở tab browser mới:
+
+```text
+INVOKE_URL/dashboard
+```
+
+3. Base URL trên form login phải tự điền đúng Invoke URL.
+4. Đăng nhập bằng username `admin` và giá trị `ADMIN_PASSWORD`.
+5. Xác nhận dashboard hiển thị:
+   - Tháng hiện tại theo UTC.
+   - Ngân sách, tiền đã dùng/còn lại.
+   - Input/output/total token.
+   - Số request.
+   - Danh sách model.
+6. Thử đổi ngân sách USD/tháng và giảm output token, chọn **Lưu cấu hình**, refresh trang và kiểm tra các giá trị vẫn còn.
+7. Tắt `claude-sonnet-5`, chọn **Lưu trạng thái model**.
+8. Chạy lại event chat: phải nhận HTTP 403 và Bedrock không được gọi.
+9. Bật lại model và lưu.
+
+## 10. Debug theo triệu chứng
+
+| Triệu chứng | Nguyên nhân thường gặp | Cách kiểm tra/sửa trên Console |
+|---|---|---|
+| API trả `{"message":"Not Found"}` | Chưa có route hoặc sai stage | API Gateway → Routes: kiểm tra `$default`; Stages: `$default` + Auto-deploy |
+| API Gateway `502 Bad Gateway` | Lambda exception hoặc response lỗi | Lambda → Monitor → View CloudWatch logs; chạy lại Lambda Test event |
+| Dashboard HTTP 500 | Thiếu `dashboard.html`, sai tên hoặc chưa Deploy | Lambda → Code: kiểm tra hai file ở root và chọn Deploy |
+| Login HTTP 500 | Thiếu biến admin hoặc session secret quá ngắn | Lambda → Configuration → Environment variables |
+| Login HTTP 401 | Sai username/password | So sánh form login với environment variables; chú ý khoảng trắng |
+| `/v1/*` HTTP 401 | Sai `API_KEY` | Kiểm tra header `Authorization: Bearer ...` hoặc `x-api-key` |
+| `AccessDeniedException` từ DynamoDB | Role thiếu `GetItem`/`UpdateItem` hoặc ARN sai | Lambda → Permissions → role → inline policy |
+| `ResourceNotFoundException` DynamoDB | Table chưa tạo, sai tên constant hoặc tạo ở region khác | Kiểm tra constant `QUOTA_TABLE_NAME` và table phải ở Singapore |
+| `AccessDeniedException` từ Bedrock | Role thiếu `bedrock:InvokeModel`, FTU chưa hoàn tất hoặc model bị SCP chặn | Kiểm tra IAM role, Bedrock Model catalog/FTU và AWS Organizations SCP |
+| `ValidationException` về model ID | Sai `DEFAULT_MODEL_MAP` hoặc profile chưa khả dụng | Dùng chính xác `global.anthropic.claude-sonnet-5`, region Singapore |
+| HTTP 403 `model_disabled` | Model đang bị tắt trong dashboard | Dashboard → Danh sách model → bật lại → Lưu trạng thái model |
+| HTTP 429 `insufficient_quota` | Đã hết budget hoặc reservation của request quá lớn | Dashboard xem remaining; giảm `max_tokens` hoặc tăng ngân sách USD/tháng rồi lưu |
+| Dashboard luôn bằng 0 | Chưa có request thành công hoặc request đi ngoài proxy | Chạy Lambda chat test, kiểm tra item `global#YYYY-MM` trong DynamoDB |
+| Tiền dashboard không khớp AWS Bill | Pricing JSON cũ, request đi ngoài proxy hoặc loại phí không được proxy tính | Cập nhật pricing; đối chiếu Bedrock Usage/Cost Explorer; bắt buộc mọi client đi qua proxy |
+| API Gateway `504` | Bedrock chạy quá giới hạn 30 giây của HTTP API | Giảm output/max_tokens; code hiện không hỗ trợ streaming; cân nhắc REST API response streaming cho workload dài |
+| Lambda báo `Task timed out` | General configuration timeout còn thấp | Lambda → Configuration → General configuration → Edit → Timeout `5 min 0 sec` |
+| Lỗi reserved environment key | Đã tự thêm `AWS_REGION` | Xóa `AWS_REGION`; Lambda tự cung cấp biến này |
+
+### Xem CloudWatch Logs
+
+1. Lambda → function `bedrock-openai-proxy`.
+2. Mở **Monitor → View CloudWatch logs**.
+3. Chọn log stream mới nhất.
+4. Tìm traceback, `AccessDeniedException`, `ResourceNotFoundException`, `ValidationException` hoặc timeout.
+
+## 11. Giới hạn cần hiểu rõ
+
+- Đây là quota ở tầng ứng dụng, không phải hard cap của hóa đơn AWS toàn account.
+- Request gọi Bedrock trực tiếp, request qua proxy khác hoặc một số request lỗi có thể phát sinh chi phí ngoài số dashboard.
+- Input limit dùng ước lượng ký tự trước khi gọi model; output limit được áp trực tiếp qua Bedrock `maxTokens`.
+- Usage token sau request lấy trực tiếp từ Bedrock và là số dùng để điều chỉnh tiền đã reserve.
+- Nếu Bedrock đã trả kết quả nhưng bước finalize DynamoDB lỗi, code giữ nguyên reservation bảo thủ để tránh ghi thiếu chi phí.
+- Tháng quota dùng UTC (`YYYY-MM`), không dùng múi giờ Việt Nam.
+- HTTP API giới hạn 30 giây và bản proxy hiện không hỗ trợ `stream=true`.
+- Bedrock SDK read timeout mặc định là 240 giây, đặt bằng constant `BEDROCK_READ_TIMEOUT_SECONDS`.
+- Global Cross-Region Inference không đảm bảo dữ liệu chỉ được xử lý trong Singapore.
+
+## 12. Checklist trước production
+
+- [ ] DynamoDB Active tại `ap-southeast-1`, partition key `quota_id` kiểu String.
+- [ ] Lambda có cả `lambda_function.py` và `dashboard.html`, đã chọn Deploy.
+- [ ] Lambda General configuration: memory 512 MB, timeout 5 phút.
+- [ ] Không tự cấu hình `AWS_REGION`.
+- [ ] API key, admin password và session secret đủ dài, không dùng giá trị mẫu.
+- [ ] Lambda role có Bedrock InvokeModel và DynamoDB GetItem/UpdateItem.
+- [ ] Anthropic FTU đã hoàn tất.
+- [ ] Lambda Test: dashboard, login và chat đều thành công.
+- [ ] API Gateway có `$default` route, Lambda integration và `$default` auto-deploy stage.
+- [ ] Dashboard login được và cấu hình model/token lưu qua refresh.
+- [ ] Dashboard đã lưu được ngân sách tháng, giới hạn token và trạng thái model.
+- [ ] Pricing JSON đúng với ngày triển khai.
+- [ ] Đã thử quota 429 và model-disabled 403.
+- [ ] Đã đặt AWS Budget/Cost Anomaly Detection riêng để cảnh báo hóa đơn ngoài proxy.
