@@ -35,11 +35,12 @@ class MemoryTable:
         return {"Item": item} if item is not None else {}
 
     def scan(self, **kwargs):
+        prefix = str(kwargs.get("ExpressionAttributeValues", {}).get(":prefix", ""))
         return {
             "Items": [
                 item
                 for quota_id, item in self.items.items()
-                if quota_id.startswith("global#")
+                if quota_id.startswith(prefix)
             ]
         }
 
@@ -65,8 +66,39 @@ class MemoryTable:
                 "model_enabled": values[":models"],
                 "updated_at": values[":updated_at"],
             }
+        elif key.startswith("request#"):
+            self.items[key] = {
+                "quota_id": key,
+                "month": values[":month"],
+                "date": values[":date"],
+                "created_at": values[":created_at"],
+                "model": values[":model"],
+                "bedrock_model_id": values[":bedrock_model_id"],
+                "input_tokens": values[":input_tokens"],
+                "output_tokens": values[":output_tokens"],
+                "total_tokens": values[":total_tokens"],
+                "cost_usd": values[":cost_usd"],
+                "api_key_hash": values[":api_key_hash"],
+            }
         else:
             item = self.items.setdefault(key, {"quota_id": key})
+            if ":month" in values:
+                item["month"] = values[":month"]
+            if ":budget" in values:
+                item["monthly_budget_usd"] = values[":budget"]
+            if ":updated_at" in values:
+                item["updated_at"] = values[":updated_at"]
+            for field, value_key in (
+                ("spent_usd", ":reserved"),
+                ("spent_usd", ":delta"),
+                ("spent_usd", ":refund"),
+                ("request_count", ":one"),
+                ("request_count", ":minus_one"),
+                ("input_tokens", ":input_tokens"),
+                ("output_tokens", ":output_tokens"),
+            ):
+                if value_key in values:
+                    item[field] = item.get(field, 0) + values[value_key]
             if ":true" in values:
                 item.update(
                     {
@@ -272,6 +304,102 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(history[2]["request_count"], 12)
         self.assertEqual(history[2]["input_tokens"] + history[2]["output_tokens"], 1200)
         self.assertTrue(history[1]["budget_exhausted"])
+
+    def test_request_usage_is_logged_after_successful_completion(self):
+        history_table = MemoryTable()
+        bedrock = Mock()
+        bedrock.converse.return_value = {
+            "output": {"message": {"content": [{"text": "ok"}]}},
+            "usage": {"inputTokens": 200, "outputTokens": 50, "totalTokens": 250},
+            "stopReason": "end_turn",
+        }
+        with patch.object(proxy, "table", return_value=history_table), patch.object(proxy, "bedrock", bedrock), patch.object(
+            proxy, "current_timestamp", return_value=1784073600
+        ):
+            result = proxy.handle_chat_completions(
+                event(
+                    "POST",
+                    "/v1/chat/completions",
+                    {"model": "claude-haiku-4.5", "messages": [{"role": "user", "content": "hello"}]},
+                    "client-secret-key-at-least-24",
+                )
+            )
+        self.assertEqual(result["statusCode"], 200)
+        request_items = [item for key, item in history_table.items.items() if key.startswith("request#2026-07#")]
+        self.assertEqual(len(request_items), 1)
+        self.assertEqual(request_items[0]["model"], "claude-haiku-4.5")
+        self.assertEqual(int(request_items[0]["input_tokens"]), 200)
+        self.assertEqual(int(request_items[0]["output_tokens"]), 50)
+
+    def test_admin_request_history_filters_by_month_and_paginates(self):
+        history_table = MemoryTable()
+        history_table.items["request#2026-07#1784073600#a"] = {
+            "quota_id": "request#2026-07#1784073600#a",
+            "month": "2026-07",
+            "date": "2026-07-15",
+            "created_at": 1784073600,
+            "model": "amazon-nova-lite",
+            "bedrock_model_id": "global.amazon.nova-2-lite-v1:0",
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+            "cost_usd": 0.0000155,
+        }
+        history_table.items["request#2026-06#1781481600#b"] = {
+            "quota_id": "request#2026-06#1781481600#b",
+            "month": "2026-06",
+            "date": "2026-06-15",
+            "created_at": 1781481600,
+            "model": "claude-sonnet-4.6",
+            "bedrock_model_id": "global.anthropic.claude-sonnet-4-6",
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "cost_usd": 0.0006,
+        }
+        with patch.object(proxy, "table", return_value=history_table):
+            result = proxy.handle_admin_request_history(
+                {
+                    "queryStringParameters": {"month": "2026-07", "page": "1", "page_size": "1"},
+                    "headers": {},
+                }
+            )
+        body = json.loads(result["body"])
+        self.assertEqual(result["statusCode"], 200)
+        self.assertEqual(body["total"], 1)
+        self.assertEqual(body["items"][0]["model"], "amazon-nova-lite")
+
+    def test_admin_month_history_filters_and_paginates(self):
+        history_table = MemoryTable()
+        history_table.items["global#2026-07"] = {
+            "quota_id": "global#2026-07",
+            "month": "2026-07",
+            "monthly_budget_usd": 20,
+            "spent_usd": 2,
+            "request_count": 3,
+            "input_tokens": 10,
+            "output_tokens": 20,
+        }
+        history_table.items["global#2026-06"] = {
+            "quota_id": "global#2026-06",
+            "month": "2026-06",
+            "monthly_budget_usd": 20,
+            "spent_usd": 1,
+            "request_count": 2,
+            "input_tokens": 5,
+            "output_tokens": 6,
+        }
+        with patch.object(proxy, "table", return_value=history_table), patch.object(proxy, "now_month", return_value="2026-07"):
+            result = proxy.handle_admin_month_history(
+                {
+                    "queryStringParameters": {"month": "2026-06", "page": "1", "page_size": "10"},
+                    "headers": {},
+                }
+            )
+        body = json.loads(result["body"])
+        self.assertEqual(result["statusCode"], 200)
+        self.assertEqual(body["total"], 1)
+        self.assertEqual(body["items"][0]["month"], "2026-06")
 
     def test_budget_rejection_automatically_disables_all_models(self):
         budget_table = ReservationRejectedTable()

@@ -6,6 +6,7 @@ import os
 import secrets
 import time
 import traceback
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
@@ -89,8 +90,10 @@ CONFIG_KEY = "config#proxy"
 CREDENTIALS_KEY = "auth#credentials"
 ADMIN_SESSION_TTL_SECONDS = 8 * 60 * 60
 PASSWORD_HASH_ITERATIONS = 210_000
-PROXY_VERSION = "2026.07.15-four-models-v7"
+PROXY_VERSION = "2026.07.15-usage-history-v8"
 HISTORY_MONTH_LIMIT = 24
+DEFAULT_HISTORY_PAGE_SIZE = 10
+MAX_HISTORY_PAGE_SIZE = 100
 
 
 def response(status_code: int, body: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
@@ -202,8 +205,17 @@ def method(event: Dict[str, Any]) -> str:
     ).upper()
 
 
+def query_params(event: Dict[str, Any]) -> Dict[str, str]:
+    values = event.get("queryStringParameters") or {}
+    return {str(key): str(value) for key, value in values.items() if value is not None}
+
+
 def now_month() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+def current_timestamp() -> int:
+    return int(time.time())
 
 
 def get_api_key(event: Dict[str, Any]) -> str:
@@ -464,6 +476,46 @@ def cost_usd(model_id: str, input_tokens: int, output_tokens: int) -> float:
     return (input_tokens / 1_000_000 * input_per_1m) + (output_tokens / 1_000_000 * output_per_1m)
 
 
+def clamp_page_size(value: Any) -> int:
+    try:
+        page_size = int(value)
+    except (TypeError, ValueError):
+        page_size = DEFAULT_HISTORY_PAGE_SIZE
+    return min(MAX_HISTORY_PAGE_SIZE, max(1, page_size))
+
+
+def parse_page(value: Any) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 1
+
+
+def valid_month(value: str) -> bool:
+    return len(value) == 7 and value[4:5] == "-" and value[:4].isdigit() and value[5:].isdigit()
+
+
+def valid_date(value: str) -> bool:
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+        return True
+    except ValueError:
+        return False
+
+
+def paginate(items: List[Dict[str, Any]], page: int, page_size: int) -> Dict[str, Any]:
+    total = len(items)
+    start = (page - 1) * page_size
+    end = start + page_size
+    return {
+        "items": items[start:end],
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": max(1, (total + page_size - 1) // page_size),
+    }
+
+
 def estimate_tokens_from_messages(messages: List[Dict[str, Any]]) -> int:
     # Conservative approximation used only for pre-call reservation.
     chars = len(json.dumps(messages, ensure_ascii=False))
@@ -596,6 +648,44 @@ def finalize_budget(reservation: Dict[str, Any], actual_usd: float, input_tokens
     budget = float(reservation.get("monthly_budget_usd", 0))
     if budget > 0 and float(attributes.get("spent_usd", 0)) >= budget:
         safe_mark_budget_exhausted(reservation["quota_id"], budget)
+
+
+def log_request_usage(
+    *,
+    api_key: str,
+    requested_model: str,
+    bedrock_model_id: str,
+    input_tokens: int,
+    output_tokens: int,
+    cost: float,
+    created_at: int,
+) -> None:
+    month = datetime.fromtimestamp(created_at, timezone.utc).strftime("%Y-%m")
+    day = datetime.fromtimestamp(created_at, timezone.utc).strftime("%Y-%m-%d")
+    request_id = f"request#{month}#{created_at:010d}#{uuid.uuid4().hex[:12]}"
+    table().update_item(
+        Key={"quota_id": request_id},
+        UpdateExpression=(
+            "SET #month = :month, #date = :date, created_at = :created_at, "
+            "model = :model, bedrock_model_id = :bedrock_model_id, input_tokens = :input_tokens, "
+            "output_tokens = :output_tokens, total_tokens = :total_tokens, cost_usd = :cost_usd, "
+            "api_key_hash = :api_key_hash"
+        ),
+        ConditionExpression="attribute_not_exists(quota_id)",
+        ExpressionAttributeNames={"#month": "month", "#date": "date"},
+        ExpressionAttributeValues={
+            ":month": month,
+            ":date": day,
+            ":created_at": created_at,
+            ":model": requested_model,
+            ":bedrock_model_id": bedrock_model_id,
+            ":input_tokens": Decimal(input_tokens),
+            ":output_tokens": Decimal(output_tokens),
+            ":total_tokens": Decimal(input_tokens + output_tokens),
+            ":cost_usd": Decimal(decimal_str(cost)),
+            ":api_key_hash": hashlib.sha256(api_key.encode("utf-8")).hexdigest(),
+        },
+    )
 
 
 def refund_budget(reservation: Dict[str, Any]) -> None:
@@ -805,6 +895,61 @@ def quota_history(current_quota: Dict[str, Any], limit: int = HISTORY_MONTH_LIMI
     return [history_by_month[month] for month in sorted(history_by_month, reverse=True)[:limit]]
 
 
+def quota_history_page(current_quota: Dict[str, Any], month_filter: str = "", page: int = 1, page_size: int = DEFAULT_HISTORY_PAGE_SIZE) -> Dict[str, Any]:
+    history = quota_history(current_quota, limit=10_000)
+    if month_filter:
+        history = [item for item in history if item["month"] == month_filter]
+    return paginate(history, page, page_size)
+
+
+def request_history(month_filter: str = "", date_filter: str = "") -> List[Dict[str, Any]]:
+    quota_table = table()
+    items: List[Dict[str, Any]] = []
+    prefix = f"request#{month_filter}#" if month_filter else "request#"
+    scan_args: Dict[str, Any] = {
+        "FilterExpression": "begins_with(quota_id, :prefix)",
+        "ProjectionExpression": (
+            "quota_id, #month, #date, created_at, model, bedrock_model_id, input_tokens, "
+            "output_tokens, total_tokens, cost_usd"
+        ),
+        "ExpressionAttributeNames": {"#month": "month", "#date": "date"},
+        "ExpressionAttributeValues": {":prefix": prefix},
+    }
+    while True:
+        page = quota_table.scan(**scan_args)
+        items.extend(page.get("Items", []))
+        last_key = page.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        scan_args["ExclusiveStartKey"] = last_key
+
+    rows: List[Dict[str, Any]] = []
+    for item in items:
+        day = str(item.get("date", ""))
+        month = str(item.get("month", ""))
+        if date_filter and day != date_filter:
+            continue
+        if month_filter and month != month_filter:
+            continue
+        input_tokens = max(0, int(item.get("input_tokens", 0)))
+        output_tokens = max(0, int(item.get("output_tokens", 0)))
+        rows.append(
+            {
+                "request_id": str(item.get("quota_id", "")),
+                "created_at": int(item.get("created_at", 0)) or None,
+                "month": month,
+                "date": day,
+                "model": str(item.get("model", "")),
+                "bedrock_model_id": str(item.get("bedrock_model_id", "")),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": max(input_tokens + output_tokens, int(item.get("total_tokens", 0))),
+                "cost_usd": round(max(0.0, float(item.get("cost_usd", 0))), 8),
+            }
+        )
+    return sorted(rows, key=lambda item: (item.get("created_at") or 0, item.get("request_id", "")), reverse=True)
+
+
 def handle_quota(event: Dict[str, Any]) -> Dict[str, Any]:
     return response(200, quota_snapshot(get_api_key(event)))
 
@@ -872,6 +1017,39 @@ def handle_admin_status() -> Dict[str, Any]:
             ],
         },
     )
+
+
+def handle_admin_month_history(event: Dict[str, Any]) -> Dict[str, Any]:
+    params = query_params(event)
+    month_filter = params.get("month", "").strip()
+    if month_filter and not valid_month(month_filter):
+        return openai_error(400, "month must use YYYY-MM format.")
+    quota = quota_snapshot("admin-dashboard")
+    result = quota_history_page(
+        quota,
+        month_filter=month_filter,
+        page=parse_page(params.get("page")),
+        page_size=clamp_page_size(params.get("page_size")),
+    )
+    return response(200, result)
+
+
+def handle_admin_request_history(event: Dict[str, Any]) -> Dict[str, Any]:
+    params = query_params(event)
+    month_filter = params.get("month", "").strip()
+    date_filter = params.get("date", "").strip()
+    if month_filter and not valid_month(month_filter):
+        return openai_error(400, "month must use YYYY-MM format.")
+    if date_filter and not valid_date(date_filter):
+        return openai_error(400, "date must use YYYY-MM-DD format.")
+    if date_filter and not month_filter:
+        month_filter = date_filter[:7]
+    result = paginate(
+        request_history(month_filter=month_filter, date_filter=date_filter),
+        parse_page(params.get("page")),
+        clamp_page_size(params.get("page_size")),
+    )
+    return response(200, result)
 
 
 def valid_admin_username(username: str) -> bool:
@@ -1098,8 +1276,18 @@ def handle_chat_completions(event: Dict[str, Any]) -> Dict[str, Any]:
         total_tokens = int(usage.get("totalTokens", input_tokens + output_tokens))
         actual_usd = cost_usd(model_id, input_tokens, output_tokens) if reservation.get("enabled") else 0.0
         finalize_budget(reservation, actual_usd, input_tokens, output_tokens)
+        created = current_timestamp()
+        if reservation.get("enabled"):
+            log_request_usage(
+                api_key=api_key,
+                requested_model=requested_model,
+                bedrock_model_id=model_id,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost=actual_usd,
+                created_at=created,
+            )
 
-        created = int(time.time())
         choice = {
             "index": 0,
             "message": {
@@ -1154,6 +1342,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 return admin_auth_error
             if method(event) == "GET" and path == "/admin/status":
                 return handle_admin_status()
+            if method(event) == "GET" and path == "/admin/month-history":
+                return handle_admin_month_history(event)
+            if method(event) == "GET" and path == "/admin/request-history":
+                return handle_admin_request_history(event)
             if method(event) == "PUT" and path == "/admin/config":
                 return handle_admin_config(event)
             if method(event) == "PUT" and path == "/admin/credentials":
@@ -1184,7 +1376,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             print(traceback.format_exc())
             return openai_error(
                 500,
-                "Lambda execution role cannot load monthly history. Grant dynamodb:Scan on "
+                "Lambda execution role cannot load usage history. Grant dynamodb:Scan on "
                 "BedrockOpenAIProxyQuota, then refresh the dashboard.",
                 "server_error",
             )

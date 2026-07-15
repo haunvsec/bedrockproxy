@@ -51,6 +51,7 @@ Table vẫn chỉ cần partition key `quota_id`. Lambda tự thêm các thuộc
 - `auth#credentials`: username, password hash, API key hash, hint và phiên bản credential.
 - `config#proxy`: ngân sách, giới hạn token và trạng thái model.
 - `global#YYYY-MM`: ngân sách, tiền, request count, input/output token và trạng thái quota của từng tháng. Mỗi tháng là một item riêng nên table tự lưu lịch sử.
+- `request#YYYY-MM#TIMESTAMP#ID`: log chi tiết từng request gồm thời gian, model, input/output token và chi phí thực tế.
 
 Không tạo thêm cột hoặc index trong màn hình **Create table**.
 
@@ -186,13 +187,13 @@ Role mặc định đã có quyền ghi CloudWatch Logs. Bổ sung Bedrock và D
 
 `bedrock:InvokeModel` là quyền mà Converse API hiện tại sử dụng. `bedrock:InvokeModelWithResponseStream` được cấp sẵn cho bản nâng cấp streaming sau này. `Resource: "*"` cho Bedrock được dùng để tránh thiếu quyền với Global Cross-Region Inference Profile và các model đích. Nếu AWS Organizations có SCP chặn một region đích, policy `Allow` ở role không thể ghi đè explicit deny đó.
 
-## 6. Hoàn tất quyền dùng Claude Sonnet 5
+## 6. Hoàn tất quyền dùng các model
 
 1. Mở **Amazon Bedrock** trong Singapore.
 2. Vào **Model catalog**.
 3. Tìm **Claude Sonnet 5**.
 4. Mở model và hoàn tất **First Time Use (FTU)** form nếu AWS yêu cầu.
-5. Làm tương tự với **Claude Haiku 4.5** nếu dùng alias `claude-haiku`.
+5. Làm tương tự với **Claude Haiku 4.5**, **Claude Sonnet 4.6** và **Amazon Nova 2 Lite** nếu AWS yêu cầu.
 6. Điền use case và website/project URL, chấp nhận điều khoản phù hợp.
 
 Anthropic yêu cầu FTU một lần cho account hoặc AWS Organization trước lần invoke đầu tiên; AWS cho biết access được cấp ngay sau khi form hợp lệ. Xem [Request access to models](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html).
@@ -200,18 +201,19 @@ Anthropic yêu cầu FTU một lần cho account hoặc AWS Organization trướ
 Proxy dùng:
 
 ```text
-global.anthropic.claude-sonnet-5
-global.anthropic.claude-haiku-4-5-20251001-v1:0
 global.amazon.nova-2-lite-v1:0
+global.anthropic.claude-haiku-4-5-20251001-v1:0
+global.anthropic.claude-sonnet-4-6
+global.anthropic.claude-sonnet-5
 ```
 
 Các Model Identifier mà client gửi tới proxy:
 
 ```text
-claude-sonnet-5
-claude-haiku
 amazon-nova-lite
-gpt-4o
+claude-haiku-4.5
+claude-sonnet-4.6
+claude-sonnet-5
 ```
 
 Lambda và endpoint vẫn ở Singapore, nhưng **Global Cross-Region Inference có thể xử lý dữ liệu ngoài Singapore**. Đây không phải cấu hình strict Singapore data residency.
@@ -296,7 +298,7 @@ Kết quả đúng:
 
 - `statusCode: 200`.
 - Body có `choices`, `usage.prompt_tokens`, `usage.completion_tokens`.
-- DynamoDB xuất hiện item `global#YYYY-MM`.
+- DynamoDB xuất hiện item `global#YYYY-MM` và item log `request#YYYY-MM#TIMESTAMP#ID`.
 
 ### 7.4 Xóa plaintext bootstrap secret
 
@@ -387,18 +389,19 @@ INVOKE_URL/dashboard
 11. Lưu API key được hiển thị vào password manager; key này chỉ hiện một lần.
 12. Kiểm tra key cũ trả HTTP 401 và key mới gọi được `/v1/models`.
 13. Có thể đổi username/mật khẩu admin tại cùng khu vực. Các session admin cũ sẽ bị vô hiệu hóa.
-14. Tại model `amazon-nova-lite` hoặc `claude-haiku`, chọn **Cấu hình client** và kiểm tra popup hiển thị đúng Base URL, Model Identifier và API Key dạng ẩn.
-15. Trong **Lịch sử sử dụng theo tháng**, kiểm tra tháng hiện tại và các item `global#YYYY-MM` cũ được hiển thị theo thứ tự mới nhất trước.
+14. Tại model `amazon-nova-lite` hoặc `claude-haiku-4.5`, chọn **Cấu hình client** và kiểm tra popup hiển thị đúng Base URL, Model Identifier và API Key dạng ẩn.
+15. Trong **Lịch sử sử dụng theo request**, lọc theo ngày/tháng và kiểm tra request vừa chạy có model, input/output token và chi phí.
+16. Trong **Lịch sử sử dụng theo tháng**, lọc theo tháng và kiểm tra các item `global#YYYY-MM` cũ được hiển thị theo thứ tự mới nhất trước.
 
 ### 9.1 Xác nhận Lambda URL đang chạy đúng phiên bản
 
 Bản dashboard mới hiển thị cuối trang:
 
 ```text
-UI 2026.07.15-route-compat-v6 · Backend 2026.07.15-route-compat-v6
+UI 2026.07.15-usage-history-v8 · Backend 2026.07.15-usage-history-v8
 ```
 
-Nếu vẫn chỉ thấy hai model `claude-sonnet-5` và `gpt-4o`, bạn đang chạy code cũ:
+Nếu vẫn không thấy đủ bốn model `amazon-nova-lite`, `claude-haiku-4.5`, `claude-sonnet-4.6`, `claude-sonnet-5`, bạn đang chạy code cũ:
 
 1. Lambda → tab **Code**: thay đúng cả `lambda_function.py` và `dashboard.html`.
 2. Chọn **Deploy**; chỉ Save file là chưa đủ.
@@ -417,11 +420,14 @@ budget_exhausted_at = <Unix timestamp>
 
 Dashboard sẽ hiển thị banner khóa ngân sách và trạng thái **TỰ ĐỘNG TẮT DO HẾT NGÂN SÁCH** trên toàn bộ model. Công tắc model bị khóa để không ghi đè cấu hình thủ công. Tăng budget lên cao hơn `spent_usd` rồi chọn **Lưu cấu hình** sẽ tự mở lại những model vốn được bật. Tháng UTC mới dùng item `global#YYYY-MM` mới nên circuit-breaker tự reset.
 
-### 9.3 Lịch sử các tháng trước
+### 9.3 Lịch sử sử dụng
 
-Dashboard đọc tối đa 24 item tháng `global#YYYY-MM`, sắp xếp tháng mới nhất trước và hiển thị request, input/output/total token, ngân sách, đã dùng, còn lại, tỷ lệ sử dụng và trạng thái quota.
+Dashboard có hai bảng lịch sử:
 
-Không cần thay partition key, tạo sort key, index hoặc migrate table. Các tháng cũ đang còn trong DynamoDB sẽ xuất hiện ngay sau khi deploy. Nếu một tháng chưa từng có request thành công hoặc item tháng đó đã bị xóa thì dashboard không thể tự dựng lại dữ liệu. Lambda role bắt buộc có quyền `dynamodb:Scan`; table global chỉ tăng khoảng một item mỗi tháng nên chi phí scan nhỏ.
+- **Lịch sử sử dụng theo request** đọc item `request#YYYY-MM#TIMESTAMP#ID`, hiển thị thời gian request, model, Bedrock ID, input/output/total token và chi phí USD.
+- **Lịch sử sử dụng theo tháng** đọc item `global#YYYY-MM`, hiển thị request, input/output/total token, ngân sách, đã dùng, còn lại, tỷ lệ sử dụng và trạng thái quota.
+
+Cả hai bảng đều có filter theo ngày/tháng và phân trang. Không cần thay partition key, tạo sort key, index hoặc migrate table. Các item cũ đang còn trong DynamoDB sẽ xuất hiện ngay sau khi deploy. Nếu item đã bị xóa thì dashboard không thể tự dựng lại dữ liệu. Lambda role bắt buộc có quyền `dynamodb:Scan`.
 
 ## 10. Debug theo triệu chứng
 
@@ -432,7 +438,7 @@ Không cần thay partition key, tạo sort key, index hoặc migrate table. Cá
 | Dashboard HTTP 500 | Thiếu `dashboard.html`, sai tên hoặc chưa Deploy | Lambda → Code: kiểm tra hai file ở root và chọn Deploy |
 | Login HTTP 500 | Chưa bootstrap `auth#credentials`, thiếu hash/session key hoặc key quá ngắn | Kiểm tra env và DynamoDB item `auth#credentials` |
 | Login báo role không truy cập được DynamoDB | Inline policy thiếu `GetItem`/`UpdateItem`, ARN sai account/region/table | Lambda → Configuration → Permissions → execution role → policy `BedrockOpenAIProxyAccess` |
-| Login được nhưng `/admin/status` HTTP 500 sau khi thêm lịch sử | Inline policy thiếu `dynamodb:Scan` | Thêm `dynamodb:Scan` vào policy `BedrockOpenAIProxyAccess`, lưu policy rồi thử **Làm mới** |
+| Login được nhưng lịch sử báo lỗi tải dữ liệu | Inline policy thiếu `dynamodb:Scan` | Thêm `dynamodb:Scan` vào policy `BedrockOpenAIProxyAccess`, lưu policy rồi thử **Làm mới** |
 | Login HTTP 401 | Sai username/password trong database | Dùng credential mới nhất đã lưu từ dashboard |
 | `/v1/*` HTTP 401 | API key sai hoặc đã được rotate | Kiểm tra header và API key mới nhất trong password manager |
 | Login/API đều lỗi sau khi đổi env key | `CREDENTIAL_HASH_KEY` không còn khớp hash trong database | Khôi phục đúng key cũ; không tự ý rotate key này |
@@ -442,7 +448,7 @@ Không cần thay partition key, tạo sort key, index hoặc migrate table. Cá
 | `ValidationException` về model ID | Sai `DEFAULT_MODEL_MAP` hoặc profile chưa khả dụng | Dùng chính xác `global.anthropic.claude-sonnet-5`, region Singapore |
 | HTTP 403 `model_disabled` | Model đang bị tắt trong dashboard | Dashboard → Danh sách model → bật lại → Lưu trạng thái model |
 | HTTP 429 `insufficient_quota` | Đã hết budget hoặc reservation của request quá lớn | Dashboard xem remaining; giảm `max_tokens` hoặc tăng ngân sách USD/tháng rồi lưu |
-| Dashboard luôn bằng 0 | Chưa có request thành công hoặc request đi ngoài proxy | Chạy Lambda chat test, kiểm tra item `global#YYYY-MM` trong DynamoDB |
+| Dashboard luôn bằng 0 | Chưa có request thành công hoặc request đi ngoài proxy | Chạy Lambda chat test, kiểm tra item `global#YYYY-MM` và `request#YYYY-MM#...` trong DynamoDB |
 | Tiền dashboard không khớp AWS Bill | Pricing JSON cũ, request đi ngoài proxy hoặc loại phí không được proxy tính | Cập nhật pricing; đối chiếu Bedrock Usage/Cost Explorer; bắt buộc mọi client đi qua proxy |
 | API Gateway `504` | Bedrock chạy quá giới hạn 30 giây của HTTP API | Giảm output/max_tokens; code hiện không hỗ trợ streaming; cân nhắc REST API response streaming cho workload dài |
 | Lambda báo `Task timed out` | General configuration timeout còn thấp | Lambda → Configuration → General configuration → Edit → Timeout `5 min 0 sec` |

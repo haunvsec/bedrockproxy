@@ -22,7 +22,7 @@ Tạo table:
 - Partition key: `quota_id` dạng `String`
 - Billing mode: On-demand
 
-Các item chính gồm `auth#credentials`, `config#proxy` và một item usage cho mỗi tháng dạng `global#YYYY-MM`. DynamoDB không cần khai báo trước các cột ngoài partition key; các item tháng cũ chính là dữ liệu lịch sử, không cần table hoặc index mới.
+Các item chính gồm `auth#credentials`, `config#proxy`, một item usage cho mỗi tháng dạng `global#YYYY-MM`, và log từng request dạng `request#YYYY-MM#TIMESTAMP#ID`. DynamoDB không cần khai báo trước các cột ngoài partition key; các item tháng cũ và request cũ chính là dữ liệu lịch sử, không cần table hoặc index mới.
 
 ## 2. Tạo Lambda function
 
@@ -72,9 +72,9 @@ Model mặc định và mức giá USD trên 1 triệu token đang cấu hình:
 | Model Identifier dùng với proxy | Bedrock Global Inference ID | Input | Output |
 |---|---|---:|---:|
 | `amazon-nova-lite` | `global.amazon.nova-2-lite-v1:0` | `$0.30` | `$2.50` |
-| `claude-haiku` | `global.anthropic.claude-haiku-4-5-20251001-v1:0` | `$1.00` | `$5.00` |
+| `claude-haiku-4.5` | `global.anthropic.claude-haiku-4-5-20251001-v1:0` | `$1.00` | `$5.00` |
+| `claude-sonnet-4.6` | `global.anthropic.claude-sonnet-4-6` | `$3.00` | `$15.00` |
 | `claude-sonnet-5` | `global.anthropic.claude-sonnet-5` | `$2.00` | `$10.00` |
-| `gpt-4o` | alias tới Claude Sonnet 5 | `$2.00` | `$10.00` |
 
 Mức `$2/$10` của Claude Sonnet 5 là giá khuyến mại đến hết ngày 31/08/2026. Sau đó đổi code thành `$3/$15` nếu AWS không công bố mức mới. Luôn kiểm tra [Amazon Bedrock Pricing](https://aws.amazon.com/bedrock/pricing/) trước khi dùng production.
 
@@ -200,7 +200,9 @@ https://YOUR_API_ID.execute-api.ap-southeast-1.amazonaws.com/dashboard
 Lần đầu đăng nhập với username `admin` và bootstrap `ADMIN_PASSWORD`. Dashboard cho phép:
 
 - Xem token, tiền, request và phần trăm ngân sách của tháng hiện tại.
-- Xem lịch sử tối đa 24 tháng: request, input/output/total token, ngân sách, tiền đã dùng, còn lại và trạng thái quota.
+- Xem lịch sử từng request: thời gian, model, input/output/total token và chi phí.
+- Xem lịch sử theo tháng: request, input/output/total token, ngân sách, tiền đã dùng, còn lại và trạng thái quota.
+- Lọc lịch sử theo ngày/tháng và phân trang.
 - Thay đổi ngân sách USD/tháng.
 - Thay đổi giới hạn input/output token trên mỗi request.
 - Xem model alias và Bedrock model ID.
@@ -210,9 +212,9 @@ Lần đầu đăng nhập với username `admin` và bootstrap `ADMIN_PASSWORD`
 - Đổi username/mật khẩu admin.
 - Nhập hoặc tự sinh API key mới; plaintext key chỉ hiện một lần.
 
-Session admin được ký bằng HMAC, gắn với phiên bản credential, chỉ lưu trong `sessionStorage` của tab và tự hết hạn. Khi credential đổi, session cũ bị vô hiệu hóa. Ngân sách/token/model lưu tại `config#proxy`; credential hash lưu tại `auth#credentials`; usage tháng lưu tại `global#YYYY-MM`.
+Session admin được ký bằng HMAC, gắn với phiên bản credential, chỉ lưu trong `sessionStorage` của tab và tự hết hạn. Khi credential đổi, session cũ bị vô hiệu hóa. Ngân sách/token/model lưu tại `config#proxy`; credential hash lưu tại `auth#credentials`; usage tháng lưu tại `global#YYYY-MM`; log request lưu tại `request#YYYY-MM#TIMESTAMP#ID`.
 
-Dashboard dùng `dynamodb:Scan` có filter `global#` để đọc lịch sử vì table hiện chỉ có partition key. Với kiến trúc global này, mỗi tháng chỉ thêm một item nên chi phí đọc rất nhỏ. Các item tháng cũ đang còn trong table sẽ tự xuất hiện; tháng không có item hoặc item đã bị xóa thì không thể khôi phục từ dashboard.
+Dashboard dùng `dynamodb:Scan` có filter prefix `global#` và `request#` để đọc lịch sử vì table hiện chỉ có partition key. Bảng request có phân trang/filter trên API để dashboard không phải render quá nhiều dòng một lúc. Các item cũ đang còn trong table sẽ tự xuất hiện; item đã bị xóa thì không thể khôi phục từ dashboard.
 
 Ví dụ cấu hình client cho model giá rẻ:
 
@@ -222,10 +224,10 @@ Model Identifier: amazon-nova-lite
 API Key: API key đang quản lý trong dashboard
 ```
 
-Hoặc Claude Haiku:
+Hoặc Claude Haiku 4.5:
 
 ```text
-Model Identifier: claude-haiku
+Model Identifier: claude-haiku-4.5
 ```
 
 Nếu client yêu cầu OpenAI base URL và không tự thêm `/v1`, dùng `https://YOUR_FUNCTION_URL.lambda-url.ap-southeast-1.on.aws/v1`.
@@ -263,7 +265,7 @@ Mỗi request dùng API key trong:
 - `Authorization: Bearer ...`, hoặc
 - `x-api-key: ...`
 
-Proxy đang dùng quota global và ghi usage tháng vào item `global#YYYY-MM` trong DynamoDB.
+Proxy đang dùng quota global, ghi usage tháng vào item `global#YYYY-MM` và ghi chi tiết từng request vào item `request#YYYY-MM#TIMESTAMP#ID` trong DynamoDB.
 
 Khi một request mới làm tổng chi phí dự toán vượt phần ngân sách còn lại, proxy kích hoạt circuit-breaker tháng:
 
@@ -307,7 +309,7 @@ const client = new OpenAI({
 });
 
 const result = await client.chat.completions.create({
-  model: "gpt-4o",
+  model: "claude-sonnet-4.6",
   messages: [{ role: "user", content: "Hello from Bedrock" }],
 });
 
@@ -325,7 +327,7 @@ client = OpenAI(
 )
 
 result = client.chat.completions.create(
-    model="gpt-4o",
+    model="claude-sonnet-4.6",
     messages=[{"role": "user", "content": "Hello from Bedrock"}],
 )
 

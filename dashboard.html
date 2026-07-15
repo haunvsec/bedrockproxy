@@ -86,6 +86,10 @@
     .switch input:disabled + .slider { background:#765022; cursor:not-allowed; }
     .history { margin-top:20px; }
     .history .topline { align-items:center; margin-bottom:12px; }
+    .history-controls { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)) auto; gap:10px; align-items:end; margin:14px 0; }
+    .history-controls label { margin-top:0; }
+    .history-controls button,.pager button { padding:10px 12px; color:#d9e8fa; background:#172b43; border:1px solid #35506d; border-radius:8px; }
+    .pager { display:flex; justify-content:flex-end; align-items:center; gap:10px; margin-top:12px; color:#9fb4cc; font-size:13px; }
     .table-wrap { overflow-x:auto; border:1px solid #24364e; border-radius:12px; }
     table { width:100%; min-width:1080px; border-collapse:collapse; background:#091524; font-size:13px; }
     th,td { padding:12px 13px; text-align:right; white-space:nowrap; border-bottom:1px solid #20334a; }
@@ -99,7 +103,7 @@
     .history-status.closed { color:#b9c8d8; background:#202f40; border:1px solid #3b4e64; }
     .history-status.locked { color:#ffd7a3; background:#4b3014; border:1px solid #80582a; }
     footer { margin-top:20px; color:#7f93ab; font-size:13px; }
-    @media(max-width:850px){ .grid{grid-template-columns:repeat(2,1fr)} .columns{grid-template-columns:1fr} }
+    @media(max-width:850px){ .grid{grid-template-columns:repeat(2,1fr)} .columns,.history-controls{grid-template-columns:1fr} }
     @media(max-width:520px){ .grid,.credential-grid{grid-template-columns:1fr} .guide-row{grid-template-columns:1fr auto}.guide-label{grid-column:1/-1} header{align-items:flex-start} .app{width:min(100% - 22px,1180px)} }
   </style>
 </head>
@@ -153,13 +157,38 @@
     </section>
 
     <section class="panel history">
-      <div class="topline"><div><h2>Lịch sử sử dụng theo tháng</h2><div class="muted">Dữ liệu theo tháng UTC, mới nhất trước; hiển thị tối đa 24 tháng.</div></div></div>
+      <div class="topline"><div><h2>Lịch sử sử dụng theo request</h2><div class="muted">Ghi theo usage thật Bedrock trả về, thời gian UTC.</div></div></div>
+      <div class="history-controls">
+        <label>Ngày<input id="requestDateFilter" type="date"></label>
+        <label>Tháng<input id="requestMonthFilter" type="month"></label>
+        <label>Số dòng / trang<input id="requestPageSize" type="number" min="1" max="100" value="10"></label>
+        <span></span>
+        <button id="requestFilterButton" type="button">Lọc request</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Thời gian</th><th>Model</th><th>Bedrock ID</th><th>Input tokens</th><th>Output tokens</th><th>Tổng tokens</th><th>Chi phí</th></tr></thead>
+          <tbody id="requestHistoryRows"><tr><td colspan="7">Đang tải dữ liệu…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="pager"><button id="requestPrevPage" type="button">Trang trước</button><span id="requestPageInfo">—</span><button id="requestNextPage" type="button">Trang sau</button></div>
+    </section>
+
+    <section class="panel history">
+      <div class="topline"><div><h2>Lịch sử sử dụng theo tháng</h2><div class="muted">Tổng hợp theo tháng UTC, có lọc và phân trang.</div></div></div>
+      <div class="history-controls">
+        <label>Tháng<input id="monthHistoryFilter" type="month"></label>
+        <label>Số dòng / trang<input id="monthPageSize" type="number" min="1" max="100" value="10"></label>
+        <span></span><span></span>
+        <button id="monthFilterButton" type="button">Lọc tháng</button>
+      </div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Tháng</th><th>Request</th><th>Input tokens</th><th>Output tokens</th><th>Tổng tokens</th><th>Ngân sách</th><th>Đã dùng</th><th>Còn lại</th><th>Sử dụng</th><th>Trạng thái</th></tr></thead>
           <tbody id="historyRows"><tr><td colspan="10">Đang tải dữ liệu…</td></tr></tbody>
         </table>
       </div>
+      <div class="pager"><button id="monthPrevPage" type="button">Trang trước</button><span id="monthPageInfo">—</span><button id="monthNextPage" type="button">Trang sau</button></div>
     </section>
 
     <dialog id="setupDialog" aria-labelledby="setupDialogTitle">
@@ -184,7 +213,7 @@
       <div id="credentialError" class="error"></div><div id="credentialSuccess" class="success">Đã cập nhật. Các phiên admin cũ đã bị vô hiệu hóa.</div>
       <div id="newApiKeyResult" class="secret-result">Hãy sao chép API key mới ngay; hệ thống sẽ không hiển thị lại.<code id="newApiKeyValue"></code><div class="actions"><button id="copyApiKey" class="copy" type="button">Sao chép API key</button></div></div>
     </form>
-    <footer>Phiên đăng nhập chỉ lưu trong tab hiện tại và tự hết hạn. <span id="buildInfo">UI 2026.07.15-route-compat-v6</span></footer>
+    <footer>Phiên đăng nhập chỉ lưu trong tab hiện tại và tự hết hạn. <span id="buildInfo">UI 2026.07.15-usage-history-v8</span></footer>
   </main>
 
   <script>
@@ -196,6 +225,10 @@
     let token = sessionStorage.getItem('bedrock_admin_token') || '';
     let baseUrl = sessionStorage.getItem('bedrock_admin_url') || $('apiUrl').value;
     let modelBudgetLocked = false;
+    let requestHistoryPage = 1;
+    let requestHistoryTotalPages = 1;
+    let monthHistoryPage = 1;
+    let monthHistoryTotalPages = 1;
 
     function showError(element,error){ element.textContent=error.message||String(error); element.style.display='block'; }
     function clearMessages(){ ['loginError','saveError','saveSuccess','credentialError','credentialSuccess'].forEach(id=>$(id).style.display='none'); }
@@ -226,6 +259,34 @@
       $('setupDialogGuide').replaceChildren(guideRow('Base URL',rootUrl,rootUrl),guideRow('Model Identifier',model.alias,model.alias),guideRow('API Key',apiDisplay),note);
       $('setupDialog').showModal();
     }
+    function historyQuery(params){
+      const query=new URLSearchParams();
+      Object.entries(params).forEach(([key,value])=>{ if(value!==undefined&&value!==null&&String(value).trim()!=='') query.set(key,String(value).trim()); });
+      const text=query.toString();
+      return text?`?${text}`:'';
+    }
+    function renderRequestHistory(result){
+      requestHistoryTotalPages=result.total_pages||1;
+      const rows=(result.items||[]).map(item=>{
+        const row=document.createElement('tr');
+        const created=item.created_at?new Date(item.created_at*1000).toLocaleString('vi-VN',{timeZone:'UTC'}):'—';
+        [created,item.model,item.bedrock_model_id,number(item.input_tokens),number(item.output_tokens),number(item.total_tokens),money(item.cost_usd)].forEach((value,index)=>{
+          const cell=document.createElement('td'); cell.textContent=value; if(index<3)cell.style.textAlign='left'; row.append(cell);
+        });
+        return row;
+      });
+      if(!rows.length){ const row=document.createElement('tr'); const cell=document.createElement('td'); cell.colSpan=7; cell.textContent='Chưa có request phù hợp.'; row.append(cell); rows.push(row); }
+      $('requestHistoryRows').replaceChildren(...rows);
+      $('requestPageInfo').textContent=`Trang ${result.page||1}/${requestHistoryTotalPages} · ${number(result.total)} request`;
+      $('requestPrevPage').disabled=(result.page||1)<=1;
+      $('requestNextPage').disabled=(result.page||1)>=requestHistoryTotalPages;
+    }
+    async function loadRequestHistory(){
+      const date=$('requestDateFilter').value;
+      const month=date?'':$('requestMonthFilter').value;
+      const result=await api(`/admin/request-history${historyQuery({date,month,page:requestHistoryPage,page_size:$('requestPageSize').value})}`);
+      renderRequestHistory(result);
+    }
     function renderHistory(history,currentMonth){
       const rows=(history||[]).map(item=>{
         const row=document.createElement('tr');
@@ -240,6 +301,17 @@
       if(!rows.length){ const row=document.createElement('tr'); const cell=document.createElement('td'); cell.colSpan=10; cell.textContent='Chưa có dữ liệu lịch sử.'; row.append(cell); rows.push(row); }
       $('historyRows').replaceChildren(...rows);
     }
+    function renderMonthHistory(result,currentMonth){
+      monthHistoryTotalPages=result.total_pages||1;
+      renderHistory(result.items||[],currentMonth);
+      $('monthPageInfo').textContent=`Trang ${result.page||1}/${monthHistoryTotalPages} · ${number(result.total)} tháng`;
+      $('monthPrevPage').disabled=(result.page||1)<=1;
+      $('monthNextPage').disabled=(result.page||1)>=monthHistoryTotalPages;
+    }
+    async function loadMonthHistory(currentMonth=''){
+      const result=await api(`/admin/month-history${historyQuery({month:$('monthHistoryFilter').value,page:monthHistoryPage,page_size:$('monthPageSize').value})}`);
+      renderMonthHistory(result,currentMonth||$('month').textContent);
+    }
     function render(data){
       const q=data.quota;
       modelBudgetLocked=Boolean(q.budget_exhausted);
@@ -250,7 +322,7 @@
       $('updated').textContent=q.updated_at?`Cập nhật ${new Date(q.updated_at*1000).toLocaleString('vi-VN')}`:'Chưa có request trong tháng';
       $('budgetLock').textContent=modelBudgetLocked?'Đã kích hoạt khóa ngân sách tháng: toàn bộ model tự động tắt. Hãy tăng ngân sách lên cao hơn số tiền đã dùng để tự mở lại model, hoặc chờ sang tháng UTC mới.' : '';
       $('budgetLock').style.display=modelBudgetLocked?'block':'none'; $('saveModelsButton').disabled=modelBudgetLocked;
-      $('buildInfo').textContent=`UI 2026.07.15-route-compat-v6 · Backend ${data.proxy_version||'không rõ/đang dùng bản cũ'}`;
+      $('buildInfo').textContent=`UI 2026.07.15-usage-history-v8 · Backend ${data.proxy_version||'không rõ/đang dùng bản cũ'}`;
       renderHistory(data.history||[q],q.month);
       $('monthlyBudget').value=data.config.monthly_budget_usd; $('inputLimit').value=data.config.input_max_tokens; $('outputLimit').value=data.config.output_max_tokens;
       if(data.credentials){ $('adminUsername').value=data.credentials.admin_username; $('apiKeyHint').textContent=data.credentials.api_key_hint; $('adminName').textContent=`Đăng nhập: ${data.credentials.admin_username}`; }
@@ -272,7 +344,11 @@
         return row;
       }));
     }
-    async function loadStatus(){ render(await api('/admin/status')); }
+    async function loadStatus(){
+      const data=await api('/admin/status');
+      render(data);
+      await Promise.all([loadRequestHistory(),loadMonthHistory(data.quota.month)]);
+    }
 
     $('loginForm').addEventListener('submit',async event=>{
       event.preventDefault(); clearMessages(); $('loginButton').disabled=true;
@@ -292,6 +368,12 @@
       }catch(error){showError($('saveError'),error);}finally{$('saveButton').disabled=false;$('saveModelsButton').disabled=modelBudgetLocked;}
     });
     $('refresh').addEventListener('click',()=>loadStatus().catch(error=>showError($('saveError'),error)));
+    $('requestFilterButton').addEventListener('click',()=>{requestHistoryPage=1;loadRequestHistory().catch(error=>showError($('saveError'),error));});
+    $('requestPrevPage').addEventListener('click',()=>{if(requestHistoryPage>1){requestHistoryPage-=1;loadRequestHistory().catch(error=>showError($('saveError'),error));}});
+    $('requestNextPage').addEventListener('click',()=>{if(requestHistoryPage<requestHistoryTotalPages){requestHistoryPage+=1;loadRequestHistory().catch(error=>showError($('saveError'),error));}});
+    $('monthFilterButton').addEventListener('click',()=>{monthHistoryPage=1;loadMonthHistory().catch(error=>showError($('saveError'),error));});
+    $('monthPrevPage').addEventListener('click',()=>{if(monthHistoryPage>1){monthHistoryPage-=1;loadMonthHistory().catch(error=>showError($('saveError'),error));}});
+    $('monthNextPage').addEventListener('click',()=>{if(monthHistoryPage<monthHistoryTotalPages){monthHistoryPage+=1;loadMonthHistory().catch(error=>showError($('saveError'),error));}});
     $('saveModelsButton').addEventListener('click',()=>$('configForm').requestSubmit());
     $('credentialForm').addEventListener('submit',async event=>{
       event.preventDefault(); clearMessages(); $('newApiKeyResult').style.display='none'; $('credentialSaveButton').disabled=true;
