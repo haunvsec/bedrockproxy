@@ -3,6 +3,8 @@ import os
 import unittest
 from unittest.mock import Mock, patch
 
+from botocore.exceptions import ClientError
+
 
 os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
 os.environ.setdefault("AWS_ACCESS_KEY_ID", "test")
@@ -24,31 +26,49 @@ def event(method, path, body=None, token=None):
     }
 
 
-class EmptyTable:
-    def get_item(self, **kwargs):
-        return {}
-
-    def update_item(self, **kwargs):
-        return {}
-
-
-class ConfigTable(EmptyTable):
+class MemoryTable:
     def __init__(self):
-        self.item = {}
+        self.items = {}
 
     def get_item(self, **kwargs):
-        return {"Item": self.item} if kwargs["Key"]["quota_id"] == proxy.CONFIG_KEY else {}
+        item = self.items.get(kwargs["Key"]["quota_id"])
+        return {"Item": item} if item is not None else {}
 
     def update_item(self, **kwargs):
-        values = kwargs["ExpressionAttributeValues"]
-        self.item = {
-            "monthly_budget_usd": values[":budget"],
-            "input_max_tokens": values[":input_limit"],
-            "output_max_tokens": values[":output_limit"],
-            "model_enabled": values[":models"],
-            "updated_at": values[":updated_at"],
-        }
+        key = kwargs["Key"]["quota_id"]
+        values = kwargs.get("ExpressionAttributeValues", {})
+        if key == proxy.CREDENTIALS_KEY:
+            self.items[key] = {
+                "quota_id": key,
+                "admin_username": values[":username"],
+                "admin_password_hash": values[":password_hash"],
+                "api_key_hash": values[":api_key_hash"],
+                "api_key_hint": values[":api_key_hint"],
+                "credential_version": values.get(":new_version", values.get(":version")),
+                "updated_at": values[":updated_at"],
+            }
+        elif key == proxy.CONFIG_KEY:
+            self.items[key] = {
+                "quota_id": key,
+                "monthly_budget_usd": values[":budget"],
+                "input_max_tokens": values[":input_limit"],
+                "output_max_tokens": values[":output_limit"],
+                "model_enabled": values[":models"],
+                "updated_at": values[":updated_at"],
+            }
         return {}
+
+
+class EmptyTable(MemoryTable):
+    pass
+
+
+class DeniedTable(MemoryTable):
+    def get_item(self, **kwargs):
+        raise ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": "denied"}},
+            "GetItem",
+        )
 
 
 class ProxyTests(unittest.TestCase):
@@ -56,9 +76,10 @@ class ProxyTests(unittest.TestCase):
         self.environment = patch.dict(
             os.environ,
             {
-                "API_KEY": "client-secret",
+                "API_KEY": "client-secret-key-at-least-24",
                 "ADMIN_PASSWORD": "admin-password",
                 "ADMIN_SESSION_SECRET": "a" * 32,
+                "CREDENTIAL_HASH_KEY": "h" * 32,
             },
             clear=False,
         )
@@ -68,19 +89,32 @@ class ProxyTests(unittest.TestCase):
         self.environment.stop()
 
     def test_admin_login_and_signed_session(self):
-        login = proxy.lambda_handler(
-            event("POST", "/admin/login", {"username": "admin", "password": "admin-password"}),
-            None,
-        )
-        self.assertEqual(login["statusCode"], 200)
-        token = json.loads(login["body"])["token"]
-        with patch.object(proxy, "table", return_value=EmptyTable()):
+        memory_table = MemoryTable()
+        with patch.object(proxy, "table", return_value=memory_table):
+            login = proxy.lambda_handler(
+                event("POST", "/admin/login", {"username": "admin", "password": "admin-password"}),
+                None,
+            )
+            self.assertEqual(login["statusCode"], 200)
+            token = json.loads(login["body"])["token"]
             status = proxy.lambda_handler(event("GET", "/admin/status", token=token), None)
         self.assertEqual(status["statusCode"], 200)
+        stored = memory_table.items[proxy.CREDENTIALS_KEY]
+        self.assertNotIn("admin-password", stored["admin_password_hash"])
+        self.assertNotIn("client-secret-key-at-least-24", stored["api_key_hash"])
 
     def test_invalid_client_api_key_is_rejected(self):
-        result = proxy.lambda_handler(event("GET", "/v1/models", token="wrong"), None)
+        with patch.object(proxy, "table", return_value=MemoryTable()):
+            result = proxy.lambda_handler(event("GET", "/v1/models", token="wrong"), None)
         self.assertEqual(result["statusCode"], 401)
+
+    def test_admin_login_reports_actionable_dynamodb_permission_error(self):
+        with patch.object(proxy, "table", return_value=DeniedTable()), patch("builtins.print"):
+            result = proxy.lambda_handler(
+                event("POST", "/admin/login", {"username": "admin", "password": "admin-password"}), None
+            )
+        self.assertEqual(result["statusCode"], 500)
+        self.assertIn("dynamodb:GetItem", json.loads(result["body"])["error"]["message"])
 
     def test_model_config_requires_real_boolean(self):
         with patch.object(proxy, "table", return_value=EmptyTable()), patch.object(
@@ -96,7 +130,7 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(result["statusCode"], 400)
 
     def test_admin_can_change_monthly_budget_and_token_limits(self):
-        config_table = ConfigTable()
+        config_table = MemoryTable()
         with patch.object(proxy, "table", return_value=config_table):
             result = proxy.handle_admin_config(
                 event(
@@ -115,6 +149,51 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(body["config"]["monthly_budget_usd"], 35.5)
         self.assertEqual(body["config"]["input_max_tokens"], 200000)
         self.assertFalse(body["models"][1]["enabled"])
+
+    def test_admin_can_rotate_password_and_api_key(self):
+        memory_table = MemoryTable()
+        with patch.object(proxy, "table", return_value=memory_table):
+            login = proxy.lambda_handler(
+                event("POST", "/admin/login", {"username": "admin", "password": "admin-password"}), None
+            )
+            old_token = json.loads(login["body"])["token"]
+            rotated = proxy.lambda_handler(
+                event(
+                    "PUT",
+                    "/admin/credentials",
+                    {
+                        "current_password": "admin-password",
+                        "new_admin_password": "new-admin-password",
+                        "generate_api_key": True,
+                    },
+                    old_token,
+                ),
+                None,
+            )
+            rotated_body = json.loads(rotated["body"])
+            self.assertEqual(rotated["statusCode"], 200)
+            self.assertTrue(rotated_body["new_api_key"].startswith("brx_"))
+            self.assertEqual(proxy.lambda_handler(event("GET", "/admin/status", token=old_token), None)["statusCode"], 401)
+            self.assertEqual(
+                proxy.lambda_handler(
+                    event("POST", "/admin/login", {"username": "admin", "password": "admin-password"}), None
+                )["statusCode"],
+                401,
+            )
+            self.assertEqual(
+                proxy.lambda_handler(
+                    event("POST", "/admin/login", {"username": "admin", "password": "new-admin-password"}), None
+                )["statusCode"],
+                200,
+            )
+            self.assertEqual(
+                proxy.lambda_handler(event("GET", "/v1/models", token=rotated_body["new_api_key"]), None)["statusCode"],
+                200,
+            )
+            self.assertEqual(
+                proxy.lambda_handler(event("GET", "/v1/models", token="client-secret-key-at-least-24"), None)["statusCode"],
+                401,
+            )
 
     def test_disabled_model_never_calls_bedrock(self):
         bedrock = Mock()

@@ -7,10 +7,10 @@ Tài liệu này dùng **chỉ giao diện web AWS Console**, không cần AWS C
 Bạn sẽ có:
 
 - Một Lambda chạy proxy OpenAI-compatible và phục vụ dashboard HTML.
-- Một DynamoDB On-Demand lưu quota tháng và cấu hình bật/tắt model.
+- Một DynamoDB On-Demand lưu quota tháng, cấu hình và credential đã hash.
 - Một HTTP API Gateway public HTTPS.
-- Xác thực API client bằng API key riêng.
-- Đăng nhập dashboard bằng tài khoản admin riêng.
+- Xác thực API client bằng API key hash lưu trong DynamoDB.
+- Đăng nhập dashboard bằng username/password hash lưu trong DynamoDB.
 - Claude Sonnet 5 qua Global Cross-Region Inference từ Singapore.
 
 Các file cần dùng:
@@ -45,6 +45,14 @@ arn:aws:dynamodb:ap-southeast-1:YOUR_ACCOUNT_ID:table/BedrockOpenAIProxyQuota
 ```
 
 DynamoDB On-Demand tính phí theo request và không cần chạy database server. Xem [DynamoDB table operations](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/WorkingWithTables.Basics.html).
+
+Table vẫn chỉ cần partition key `quota_id`. Lambda tự thêm các thuộc tính khác theo từng loại item:
+
+- `auth#credentials`: username, password hash, API key hash, hint và phiên bản credential.
+- `config#proxy`: ngân sách, giới hạn token và trạng thái model.
+- `global#YYYY-MM`: tiền, request count, input/output token của tháng.
+
+Không tạo thêm cột hoặc index trong màn hình **Create table**.
 
 ## 3. Tạo Lambda
 
@@ -106,19 +114,24 @@ Lưu ý: HTTP API Gateway có integration timeout tối đa 30 giây và không 
 
 1. Mở **Configuration → Environment variables → Edit**.
 2. Chọn **Add environment variable** cho từng dòng dưới đây.
-3. Chỉ thêm ba secret dưới đây; thay giá trị mẫu bằng chuỗi ngẫu nhiên mạnh do password manager tạo.
+3. Lần triển khai đầu, thêm bốn secret dưới đây; thay giá trị mẫu bằng chuỗi ngẫu nhiên mạnh do password manager tạo.
 
 | Key | Value mẫu |
 |---|---|
 | `API_KEY` | `client-key-ngau-nhien-rat-dai` |
 | `ADMIN_PASSWORD` | `mat-khau-admin-ngau-nhien-rat-dai` |
 | `ADMIN_SESSION_SECRET` | `chuoi-ngau-nhien-it-nhat-32-ky-tu` |
+| `CREDENTIAL_HASH_KEY` | `chuoi-ngau-nhien-khac-it-nhat-32-ky-tu` |
 
 4. Chọn **Save**.
 
-Username dashboard cố định là `admin`. Session mặc định 8 giờ. Không thêm `AWS_REGION`; Lambda tự tạo biến này và không cho phép override.
+`API_KEY` phải dài ít nhất 24 ký tự, `ADMIN_PASSWORD` ít nhất 12 ký tự. Username bootstrap là `admin`. `ADMIN_SESSION_SECRET` và `CREDENTIAL_HASH_KEY` phải là hai chuỗi khác nhau, mỗi chuỗi ít nhất 32 byte. Session mặc định 8 giờ. Không thêm `AWS_REGION`; Lambda tự tạo biến này và không cho phép override.
 
-Region, Bedrock timeout, DynamoDB table, model map, quota scope và giá token được đặt bằng constants ở đầu `lambda_function.py`. Ngân sách USD/tháng, input/output token limit và trạng thái model chỉnh trong dashboard, sau đó được lưu tại item `config#proxy` trong DynamoDB.
+`API_KEY` và `ADMIN_PASSWORD` chỉ tồn tại tạm thời để khởi tạo database. Lần gọi Lambda đầu tiên ghi item `auth#credentials` chứa API key HMAC và password PBKDF2 có khóa. Sau khi test login thành công, thực hiện mục 7.4 để xóa hai plaintext secret này khỏi env.
+
+Giữ `CREDENTIAL_HASH_KEY` ổn định và sao lưu trong password manager. Nếu đổi hoặc làm mất key này, các hash hiện có không thể xác minh và admin/API client sẽ không đăng nhập được. Thay `ADMIN_SESSION_SECRET` sẽ vô hiệu hóa toàn bộ session admin đang mở.
+
+Region, Bedrock timeout, DynamoDB table, model map, quota scope và giá token được đặt bằng constants ở đầu `lambda_function.py`. Ngân sách USD/tháng, input/output token limit và trạng thái model chỉnh trong dashboard, sau đó được lưu tại item `config#proxy` trong DynamoDB. Username/password/API key quản lý trong dashboard và hash lưu tại `auth#credentials`.
 
 Giá `$2/$10` trên một triệu input/output token là giá khuyến mại Claude Sonnet 5 đến hết **31/08/2026**. Từ **01/09/2026**, theo công bố hiện tại của AWS, đổi thành:
 
@@ -147,7 +160,10 @@ Role mặc định đã có quyền ghi CloudWatch Logs. Bổ sung Bedrock và D
     {
       "Sid": "InvokeBedrockModels",
       "Effect": "Allow",
-      "Action": "bedrock:InvokeModel",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+      ],
       "Resource": "*"
     },
     {
@@ -167,7 +183,7 @@ Role mặc định đã có quyền ghi CloudWatch Logs. Bổ sung Bedrock và D
 7. Policy name: `BedrockOpenAIProxyAccess`.
 8. Chọn **Create policy**.
 
-`Resource: "*"` cho Bedrock được dùng để tránh thiếu quyền với Global Cross-Region Inference Profile và các model đích. Sau khi chạy ổn, có thể siết ARN theo chính sách của tổ chức.
+`bedrock:InvokeModel` là quyền mà Converse API hiện tại sử dụng. `bedrock:InvokeModelWithResponseStream` được cấp sẵn cho bản nâng cấp streaming sau này. `Resource: "*"` cho Bedrock được dùng để tránh thiếu quyền với Global Cross-Region Inference Profile và các model đích. Nếu AWS Organizations có SCP chặn một region đích, policy `Allow` ở role không thể ghi đè explicit deny đó.
 
 ## 6. Hoàn tất quyền dùng Claude Sonnet 5
 
@@ -238,7 +254,7 @@ Tạo event `AdminLogin`, thay password đúng với environment variable:
 }
 ```
 
-Kết quả đúng là HTTP 200 và có `token`. HTTP 401 nghĩa là sai username/password. HTTP 500 về admin configuration thường là thiếu một trong ba biến admin hoặc `ADMIN_SESSION_SECRET` ngắn hơn 32 byte.
+Kết quả đúng là HTTP 200 và có `token`. Đồng thời DynamoDB xuất hiện item `auth#credentials`. HTTP 401 nghĩa là sai username/password. HTTP 500 về admin configuration thường là thiếu bootstrap credential, thiếu key hoặc key ngắn hơn 32 byte.
 
 ### 7.3 Test chat, DynamoDB và Bedrock cùng lúc
 
@@ -268,6 +284,19 @@ Kết quả đúng:
 - `statusCode: 200`.
 - Body có `choices`, `usage.prompt_tokens`, `usage.completion_tokens`.
 - DynamoDB xuất hiện item `global#YYYY-MM`.
+
+### 7.4 Xóa plaintext bootstrap secret
+
+Chỉ làm bước này sau khi login và chat test đều thành công:
+
+1. DynamoDB → Tables → `BedrockOpenAIProxyQuota` → **Explore table items**.
+2. Chọn **Run scan** và xác nhận có item `quota_id = auth#credentials`.
+3. Lambda → `bedrock-openai-proxy` → **Configuration → Environment variables → Edit**.
+4. Xóa hai dòng `API_KEY` và `ADMIN_PASSWORD`.
+5. Giữ lại `CREDENTIAL_HASH_KEY` và `ADMIN_SESSION_SECRET`.
+6. Chọn **Save**, test đăng nhập lại và gọi chat bằng API key cũ.
+
+Database chỉ chứa `admin_password_hash` và `api_key_hash`; không chứa plaintext. Không xóa `auth#credentials` sau khi đã xóa bootstrap env, nếu không hệ thống sẽ không thể tự khởi tạo lại.
 
 ## 8. Tạo HTTP API Gateway
 
@@ -340,6 +369,10 @@ INVOKE_URL/dashboard
 7. Tắt `claude-sonnet-5`, chọn **Lưu trạng thái model**.
 8. Chạy lại event chat: phải nhận HTTP 403 và Bedrock không được gọi.
 9. Bật lại model và lưu.
+10. Trong **Tài khoản admin và API key**, nhập mật khẩu hiện tại rồi chọn **Tự sinh API key mạnh**.
+11. Lưu API key được hiển thị vào password manager; key này chỉ hiện một lần.
+12. Kiểm tra key cũ trả HTTP 401 và key mới gọi được `/v1/models`.
+13. Có thể đổi username/mật khẩu admin tại cùng khu vực. Các session admin cũ sẽ bị vô hiệu hóa.
 
 ## 10. Debug theo triệu chứng
 
@@ -348,12 +381,14 @@ INVOKE_URL/dashboard
 | API trả `{"message":"Not Found"}` | Chưa có route hoặc sai stage | API Gateway → Routes: kiểm tra `$default`; Stages: `$default` + Auto-deploy |
 | API Gateway `502 Bad Gateway` | Lambda exception hoặc response lỗi | Lambda → Monitor → View CloudWatch logs; chạy lại Lambda Test event |
 | Dashboard HTTP 500 | Thiếu `dashboard.html`, sai tên hoặc chưa Deploy | Lambda → Code: kiểm tra hai file ở root và chọn Deploy |
-| Login HTTP 500 | Thiếu biến admin hoặc session secret quá ngắn | Lambda → Configuration → Environment variables |
-| Login HTTP 401 | Sai username/password | So sánh form login với environment variables; chú ý khoảng trắng |
-| `/v1/*` HTTP 401 | Sai `API_KEY` | Kiểm tra header `Authorization: Bearer ...` hoặc `x-api-key` |
+| Login HTTP 500 | Chưa bootstrap `auth#credentials`, thiếu hash/session key hoặc key quá ngắn | Kiểm tra env và DynamoDB item `auth#credentials` |
+| Login báo role không truy cập được DynamoDB | Inline policy thiếu `GetItem`/`UpdateItem`, ARN sai account/region/table | Lambda → Configuration → Permissions → execution role → policy `BedrockOpenAIProxyAccess` |
+| Login HTTP 401 | Sai username/password trong database | Dùng credential mới nhất đã lưu từ dashboard |
+| `/v1/*` HTTP 401 | API key sai hoặc đã được rotate | Kiểm tra header và API key mới nhất trong password manager |
+| Login/API đều lỗi sau khi đổi env key | `CREDENTIAL_HASH_KEY` không còn khớp hash trong database | Khôi phục đúng key cũ; không tự ý rotate key này |
 | `AccessDeniedException` từ DynamoDB | Role thiếu `GetItem`/`UpdateItem` hoặc ARN sai | Lambda → Permissions → role → inline policy |
 | `ResourceNotFoundException` DynamoDB | Table chưa tạo, sai tên constant hoặc tạo ở region khác | Kiểm tra constant `QUOTA_TABLE_NAME` và table phải ở Singapore |
-| `AccessDeniedException` từ Bedrock | Role thiếu `bedrock:InvokeModel`, FTU chưa hoàn tất hoặc model bị SCP chặn | Kiểm tra IAM role, Bedrock Model catalog/FTU và AWS Organizations SCP |
+| `AccessDeniedException` từ Bedrock | Role thiếu `bedrock:InvokeModel`, FTU chưa hoàn tất hoặc model/region đích bị SCP chặn | Kiểm tra policy `BedrockOpenAIProxyAccess`, Bedrock Model catalog/FTU và AWS Organizations SCP |
 | `ValidationException` về model ID | Sai `DEFAULT_MODEL_MAP` hoặc profile chưa khả dụng | Dùng chính xác `global.anthropic.claude-sonnet-5`, region Singapore |
 | HTTP 403 `model_disabled` | Model đang bị tắt trong dashboard | Dashboard → Danh sách model → bật lại → Lưu trạng thái model |
 | HTTP 429 `insufficient_quota` | Đã hết budget hoặc reservation của request quá lớn | Dashboard xem remaining; giảm `max_tokens` hoặc tăng ngân sách USD/tháng rồi lưu |
@@ -388,13 +423,16 @@ INVOKE_URL/dashboard
 - [ ] Lambda có cả `lambda_function.py` và `dashboard.html`, đã chọn Deploy.
 - [ ] Lambda General configuration: memory 512 MB, timeout 5 phút.
 - [ ] Không tự cấu hình `AWS_REGION`.
-- [ ] API key, admin password và session secret đủ dài, không dùng giá trị mẫu.
-- [ ] Lambda role có Bedrock InvokeModel và DynamoDB GetItem/UpdateItem.
+- [ ] Bootstrap API key/password đủ dài; hash key và session secret khác nhau, tối thiểu 32 byte.
+- [ ] Item `auth#credentials` đã được tạo; đã xóa plaintext `API_KEY`/`ADMIN_PASSWORD` khỏi env sau khi test.
+- [ ] `CREDENTIAL_HASH_KEY` đã được sao lưu an toàn và không bị thay đổi.
+- [ ] Lambda role có Bedrock InvokeModel/InvokeModelWithResponseStream và DynamoDB GetItem/UpdateItem.
 - [ ] Anthropic FTU đã hoàn tất.
 - [ ] Lambda Test: dashboard, login và chat đều thành công.
 - [ ] API Gateway có `$default` route, Lambda integration và `$default` auto-deploy stage.
 - [ ] Dashboard login được và cấu hình model/token lưu qua refresh.
 - [ ] Dashboard đã lưu được ngân sách tháng, giới hạn token và trạng thái model.
+- [ ] Đã thử rotate API key và đổi password admin từ dashboard.
 - [ ] Pricing JSON đúng với ngày triển khai.
 - [ ] Đã thử quota 429 và model-disabled 403.
 - [ ] Đã đặt AWS Budget/Cost Anomaly Detection riêng để cảnh báo hóa đơn ngoài proxy.

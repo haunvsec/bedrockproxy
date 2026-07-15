@@ -44,6 +44,13 @@
     .panel h2 { font-size:19px; margin-bottom:5px; }
     .actions { display:flex; justify-content:flex-end; gap:10px; margin-top:20px; }
     .save { padding:10px 18px; border:0; border-radius:9px; color:white; background:var(--blue); font-weight:700; }
+    .credentials { margin-top:20px; }
+    .credential-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 18px; }
+    .checkline { display:flex; grid-column:1/-1; align-items:center; gap:10px; }
+    .checkline input { width:auto; }
+    .secret-result { display:none; margin-top:14px; padding:14px; color:#dff9ee; background:#0a3028; border:1px solid #26715d; border-radius:10px; }
+    .secret-result code { display:block; margin-top:8px; padding:10px; overflow-wrap:anywhere; color:#fff; background:#071c18; border-radius:8px; user-select:all; }
+    .copy { padding:8px 12px; color:#d9e8fa; background:#172b43; border:1px solid #35506d; border-radius:8px; }
     .model-list { display:grid; gap:10px; margin-top:16px; }
     .model { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:15px; align-items:center; padding:14px; background:#091524; border:1px solid #24364e; border-radius:12px; }
     .model strong,.model small { display:block; overflow-wrap:anywhere; }
@@ -56,7 +63,7 @@
     .switch input:checked + .slider:before { transform:translateX(21px); }
     footer { margin-top:20px; color:#7f93ab; font-size:13px; }
     @media(max-width:850px){ .grid{grid-template-columns:repeat(2,1fr)} .columns{grid-template-columns:1fr} }
-    @media(max-width:520px){ .grid{grid-template-columns:1fr} header{align-items:flex-start} .app{width:min(100% - 22px,1180px)} }
+    @media(max-width:520px){ .grid,.credential-grid{grid-template-columns:1fr} header{align-items:flex-start} .app{width:min(100% - 22px,1180px)} }
   </style>
 </head>
 <body>
@@ -106,6 +113,22 @@
         <div class="actions"><button id="saveModelsButton" class="save" type="button">Lưu trạng thái model</button></div>
       </section>
     </section>
+
+    <form id="credentialForm" class="panel credentials">
+      <h2>Tài khoản admin và API key</h2>
+      <p class="muted">Thông tin xác thực được lưu dạng hash có khóa trong DynamoDB. API key hiện tại: <strong id="apiKeyHint">—</strong>. API key mới chỉ hiển thị một lần.</p>
+      <div class="credential-grid">
+        <label>Tên đăng nhập admin<input id="adminUsername" autocomplete="username" minlength="3" maxlength="64" required></label>
+        <label>Mật khẩu hiện tại<input id="currentPassword" type="password" autocomplete="current-password" required></label>
+        <label>Mật khẩu admin mới (để trống nếu không đổi)<input id="newPassword" type="password" autocomplete="new-password" minlength="12" maxlength="256"></label>
+        <label>Nhập lại mật khẩu mới<input id="confirmPassword" type="password" autocomplete="new-password" minlength="12" maxlength="256"></label>
+        <label>API key mới tự chọn (ít nhất 24 ký tự)<input id="newApiKeyInput" type="password" minlength="24" maxlength="512" autocomplete="off"></label>
+        <label class="checkline"><input id="generateApiKey" type="checkbox"> Tự sinh API key mạnh thay vì nhập thủ công</label>
+      </div>
+      <div class="actions"><button id="credentialSaveButton" class="save" type="submit">Cập nhật thông tin xác thực</button></div>
+      <div id="credentialError" class="error"></div><div id="credentialSuccess" class="success">Đã cập nhật. Các phiên admin cũ đã bị vô hiệu hóa.</div>
+      <div id="newApiKeyResult" class="secret-result">Hãy sao chép API key mới ngay; hệ thống sẽ không hiển thị lại.<code id="newApiKeyValue"></code><div class="actions"><button id="copyApiKey" class="copy" type="button">Sao chép API key</button></div></div>
+    </form>
     <footer>Phiên đăng nhập chỉ lưu trong tab hiện tại và tự hết hạn.</footer>
   </main>
 
@@ -119,7 +142,7 @@
     let baseUrl = sessionStorage.getItem('bedrock_admin_url') || $('apiUrl').value;
 
     function showError(element,error){ element.textContent=error.message||String(error); element.style.display='block'; }
-    function clearMessages(){ ['loginError','saveError','saveSuccess'].forEach(id=>$(id).style.display='none'); }
+    function clearMessages(){ ['loginError','saveError','saveSuccess','credentialError','credentialSuccess'].forEach(id=>$(id).style.display='none'); }
     async function api(path,options={}){
       const headers={'content-type':'application/json',...(options.headers||{})};
       if(token) headers.authorization=`Bearer ${token}`;
@@ -140,6 +163,7 @@
       $('usageBar').style.width=`${Math.min(100,Math.max(0,q.used_percent||0))}%`; $('percent').textContent=`${q.used_percent||0}% ngân sách đã dùng`;
       $('updated').textContent=q.updated_at?`Cập nhật ${new Date(q.updated_at*1000).toLocaleString('vi-VN')}`:'Chưa có request trong tháng';
       $('monthlyBudget').value=data.config.monthly_budget_usd; $('inputLimit').value=data.config.input_max_tokens; $('outputLimit').value=data.config.output_max_tokens;
+      if(data.credentials){ $('adminUsername').value=data.credentials.admin_username; $('apiKeyHint').textContent=data.credentials.api_key_hint; $('adminName').textContent=`Đăng nhập: ${data.credentials.admin_username}`; }
       $('modelList').replaceChildren(...data.models.map(model=>{
         const row=document.createElement('div'); row.className='model';
         const info=document.createElement('div'); const name=document.createElement('strong'); name.textContent=model.alias;
@@ -170,6 +194,20 @@
     });
     $('refresh').addEventListener('click',()=>loadStatus().catch(error=>showError($('saveError'),error)));
     $('saveModelsButton').addEventListener('click',()=>$('configForm').requestSubmit());
+    $('credentialForm').addEventListener('submit',async event=>{
+      event.preventDefault(); clearMessages(); $('newApiKeyResult').style.display='none'; $('credentialSaveButton').disabled=true;
+      try{
+        if($('newPassword').value!==$('confirmPassword').value) throw new Error('Mật khẩu mới nhập lại không khớp.');
+        const body={admin_username:$('adminUsername').value.trim(),current_password:$('currentPassword').value,new_admin_password:$('newPassword').value,new_api_key:$('newApiKeyInput').value.trim(),generate_api_key:$('generateApiKey').checked};
+        const data=await api('/admin/credentials',{method:'PUT',body:JSON.stringify(body)});
+        token=data.token; sessionStorage.setItem('bedrock_admin_token',token); $('adminName').textContent=`Đăng nhập: ${data.username}`; $('username').value=data.username;
+        $('apiKeyHint').textContent=data.credentials.api_key_hint; $('currentPassword').value=''; $('newPassword').value=''; $('confirmPassword').value=''; $('newApiKeyInput').value=''; $('newApiKeyInput').disabled=false; $('generateApiKey').checked=false; $('copyApiKey').textContent='Sao chép API key';
+        $('credentialSuccess').style.display='block';
+        if(data.new_api_key){ $('newApiKeyValue').textContent=data.new_api_key; $('newApiKeyResult').style.display='block'; }
+      }catch(error){showError($('credentialError'),error);}finally{$('credentialSaveButton').disabled=false;}
+    });
+    $('generateApiKey').addEventListener('change',()=>{ $('newApiKeyInput').disabled=$('generateApiKey').checked; if($('generateApiKey').checked) $('newApiKeyInput').value=''; });
+    $('copyApiKey').addEventListener('click',async()=>{ try{await navigator.clipboard.writeText($('newApiKeyValue').textContent); $('copyApiKey').textContent='Đã sao chép';}catch(error){showError($('credentialError'),new Error('Không thể tự sao chép; hãy chọn và sao chép API key thủ công.'));} });
     $('logout').addEventListener('click',logout);
     if(token&&baseUrl){ $('adminName').textContent='Đăng nhập: admin'; $('loginPage').classList.add('hidden'); $('app').classList.remove('hidden'); loadStatus().catch(()=>logout()); }
   </script>

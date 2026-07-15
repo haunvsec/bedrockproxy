@@ -8,7 +8,7 @@ Lambda này expose một API gần giống OpenAI:
 - `GET /v1/quota`
 - `POST /v1/chat/completions`
 
-Phía sau Lambda gọi Amazon Bedrock `Converse API`, rồi convert response về format OpenAI Chat Completions. Proxy cũng có quota theo số tiền/tháng, lưu usage trong DynamoDB.
+Phía sau Lambda gọi Amazon Bedrock `Converse API`, rồi convert response về format OpenAI Chat Completions. Proxy cũng có quota theo số tiền/tháng, lưu usage, cấu hình và credential đã hash trong DynamoDB.
 
 Hiện bản này hỗ trợ non-streaming chat completion. `stream=true`, tool calling, vision input chưa bật.
 
@@ -20,7 +20,7 @@ Tạo table:
 - Partition key: `quota_id` dạng `String`
 - Billing mode: On-demand
 
-Mỗi record tương ứng một API key hash + tháng hiện tại, ví dụ `abc123...#2026-07`.
+Các item chính gồm `auth#credentials`, `config#proxy` và `global#YYYY-MM`. DynamoDB không cần khai báo trước các cột ngoài partition key.
 
 ## 2. Tạo Lambda function
 
@@ -39,17 +39,29 @@ Handler:
 lambda_function.lambda_handler
 ```
 
-## 3. Environment variables
+## 3. Environment variables và khởi tạo credential
 
-Chỉ cấu hình ba secret:
+Lần triển khai đầu tiên cấu hình bốn secret:
 
 ```text
 API_KEY=thay-bang-mot-secret-dai-ngau-nhien
 ADMIN_PASSWORD=thay-bang-mat-khau-admin-manh
 ADMIN_SESSION_SECRET=chuoi-ngau-nhien-toi-thieu-32-ky-tu
+CREDENTIAL_HASH_KEY=chuoi-ngau-nhien-khac-toi-thieu-32-ky-tu
 ```
 
-Proxy chấp nhận `API_KEY` qua `Authorization: Bearer <key>` hoặc `x-api-key: <key>`. Username dashboard cố định là `admin`. `ADMIN_SESSION_SECRET` dùng ký session, phải là chuỗi ngẫu nhiên tối thiểu 32 byte. Session mặc định hết hạn sau 8 giờ.
+`API_KEY` phải dài ít nhất 24 ký tự, `ADMIN_PASSWORD` ít nhất 12 ký tự. Hai giá trị này chỉ dùng để bootstrap item `auth#credentials` ở lần gọi Lambda đầu tiên. Sau khi đăng nhập dashboard thành công và thấy item trên DynamoDB, xóa `API_KEY` và `ADMIN_PASSWORD` khỏi Lambda env. Trạng thái ổn định chỉ cần:
+
+```text
+ADMIN_SESSION_SECRET=chuoi-ngau-nhien-toi-thieu-32-ky-tu
+CREDENTIAL_HASH_KEY=chuoi-ngau-nhien-khac-toi-thieu-32-ky-tu
+```
+
+Không đổi hoặc làm mất `CREDENTIAL_HASH_KEY`, vì mọi API key/password đang lưu sẽ không xác minh được. `ADMIN_SESSION_SECRET` dùng ký session; thay giá trị này sẽ đăng xuất tất cả admin. Hai key phải là chuỗi ngẫu nhiên khác nhau và tối thiểu 32 byte.
+
+Proxy chấp nhận API key qua `Authorization: Bearer <key>` hoặc `x-api-key: <key>`. Username khởi tạo là `admin`; sau đó username, password và API key đều quản lý trên dashboard.
+
+API key được lưu bằng HMAC-SHA256 có domain separation. Password được lưu bằng PBKDF2-HMAC-SHA256 210.000 vòng, salt ngẫu nhiên và pepper từ `CREDENTIAL_HASH_KEY`. Đây là hash một chiều có khóa, không phải mã hóa hai chiều, nên an toàn hơn vì Lambda không có chức năng đọc lại plaintext. API key mới chỉ hiển thị một lần khi tạo.
 
 Các cấu hình không nhạy cảm nằm ở đầu [lambda_function.py](/Volumes/DATA/openai_bedrock/lambda_function.py): region Singapore, read timeout 240 giây, table name, global quota, model map, giá token và giá trị mặc định. Ngân sách tháng, giới hạn token và trạng thái bật/tắt model chỉnh trực tiếp trên dashboard rồi lưu vào DynamoDB.
 
@@ -70,7 +82,8 @@ Gắn policy tối thiểu tương tự:
     {
       "Effect": "Allow",
       "Action": [
-        "bedrock:InvokeModel"
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
       ],
       "Resource": "*"
     },
@@ -118,6 +131,7 @@ Tạo API:
    - `POST /admin/login`
    - `GET /admin/status`
    - `PUT /admin/config`
+   - `PUT /admin/credentials`
    - `GET /v1/models`
    - `GET /v1/quota`
    - `POST /v1/chat/completions`
@@ -171,15 +185,17 @@ curl https://YOUR_API_ID.execute-api.ap-southeast-1.amazonaws.com/v1/quota \
 https://YOUR_API_ID.execute-api.ap-southeast-1.amazonaws.com/dashboard
 ```
 
-Đăng nhập với username `admin` và `ADMIN_PASSWORD`. Dashboard cho phép:
+Lần đầu đăng nhập với username `admin` và bootstrap `ADMIN_PASSWORD`. Dashboard cho phép:
 
 - Xem token, tiền, request và phần trăm ngân sách của tháng hiện tại.
 - Thay đổi ngân sách USD/tháng.
 - Thay đổi giới hạn input/output token trên mỗi request.
 - Xem model alias và Bedrock model ID.
 - Bật/tắt từng model; model bị tắt sẽ trả HTTP 403 và không gọi Bedrock.
+- Đổi username/mật khẩu admin.
+- Nhập hoặc tự sinh API key mới; plaintext key chỉ hiện một lần.
 
-Session admin được ký bằng HMAC, chỉ lưu trong `sessionStorage` của tab và tự hết hạn. Ngân sách/token/model lưu tại record `config#proxy` trong DynamoDB và áp dụng cho request mới.
+Session admin được ký bằng HMAC, gắn với phiên bản credential, chỉ lưu trong `sessionStorage` của tab và tự hết hạn. Khi credential đổi, session cũ bị vô hiệu hóa. Ngân sách/token/model lưu tại `config#proxy`; credential hash lưu tại `auth#credentials`; usage tháng lưu tại `global#YYYY-MM`.
 
 Response mẫu:
 

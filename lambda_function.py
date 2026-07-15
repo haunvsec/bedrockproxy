@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 import time
 import traceback
 from datetime import datetime, timezone
@@ -23,7 +24,7 @@ QUOTA_SCOPE = "global"
 DEFAULT_MONTHLY_BUDGET_USD = 20.0
 DEFAULT_INPUT_MAX_TOKENS = 256_000
 DEFAULT_OUTPUT_MAX_TOKENS = 128_000
-ADMIN_USERNAME = "admin"
+DEFAULT_ADMIN_USERNAME = "admin"
 
 bedrock = boto3.client(
     "bedrock-runtime",
@@ -47,7 +48,9 @@ DEFAULT_MODEL_PRICING = {
 }
 
 CONFIG_KEY = "config#proxy"
+CREDENTIALS_KEY = "auth#credentials"
 ADMIN_SESSION_TTL_SECONDS = 8 * 60 * 60
+PASSWORD_HASH_ITERATIONS = 210_000
 
 
 def response(status_code: int, body: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
@@ -102,6 +105,30 @@ def openai_error(status_code: int, message: str, error_type: str = "invalid_requ
     )
 
 
+def credential_database_error(exc: ClientError) -> Dict[str, Any]:
+    """Return an actionable error without exposing AWS account details or stored credentials."""
+    print("Credential database error:\n" + traceback.format_exc())
+    error_code = str(exc.response.get("Error", {}).get("Code", "UnknownClientError"))
+    if error_code in ("AccessDeniedException", "UnauthorizedOperation"):
+        message = (
+            "Lambda execution role cannot access DynamoDB credentials. Grant dynamodb:GetItem and "
+            "dynamodb:UpdateItem on table BedrockOpenAIProxyQuota in ap-southeast-1."
+        )
+    elif error_code == "ResourceNotFoundException":
+        message = (
+            "DynamoDB table BedrockOpenAIProxyQuota was not found in ap-southeast-1. "
+            "Create the table there or correct QUOTA_TABLE_NAME."
+        )
+    elif error_code == "ValidationException":
+        message = (
+            "DynamoDB rejected the credentials item update. Confirm the table partition key is "
+            "quota_id (String), with no sort key."
+        )
+    else:
+        message = f"DynamoDB credential operation failed ({error_code}). Check the latest Lambda log stream."
+    return openai_error(500, message, "server_error")
+
+
 def get_header(event: Dict[str, Any], name: str) -> Optional[str]:
     headers = event.get("headers") or {}
     wanted = name.lower()
@@ -146,33 +173,6 @@ def get_api_key(event: Dict[str, Any]) -> str:
     return get_header(event, "x-api-key") or "anonymous"
 
 
-def configured_api_keys() -> List[str]:
-    """Load the client API key. Keep secrets in Lambda environment variables."""
-    single_key = os.environ.get("API_KEY", "").strip()
-    return [single_key] if single_key else []
-
-
-def authenticate(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    try:
-        valid_keys = configured_api_keys()
-    except (ValueError, json.JSONDecodeError) as exc:
-        return openai_error(500, f"Authentication configuration error: {exc}", "server_error")
-
-    if not valid_keys:
-        return openai_error(
-            500,
-            "Authentication is not configured. Set API_KEY.",
-            "server_error",
-        )
-
-    supplied_key = get_api_key(event)
-    if supplied_key == "anonymous" or not any(
-        hmac.compare_digest(supplied_key, valid_key) for valid_key in valid_keys
-    ):
-        return openai_error(401, "Invalid or missing API key.", "authentication_error")
-    return None
-
-
 def base64url_encode(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
 
@@ -181,22 +181,150 @@ def base64url_decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
-def admin_credentials_configured() -> bool:
-    return all(os.environ.get(name, "").strip() for name in ("ADMIN_PASSWORD", "ADMIN_SESSION_SECRET"))
+def credential_secret() -> bytes:
+    secret = os.environ.get("CREDENTIAL_HASH_KEY", "").encode("utf-8")
+    if len(secret) < 32:
+        raise ValueError("CREDENTIAL_HASH_KEY must be at least 32 bytes.")
+    return secret
 
 
-def admin_configuration_error() -> Optional[str]:
-    if not admin_credentials_configured():
-        return "Set ADMIN_PASSWORD and ADMIN_SESSION_SECRET."
-    if len(os.environ["ADMIN_SESSION_SECRET"].encode("utf-8")) < 32:
-        return "ADMIN_SESSION_SECRET must be at least 32 bytes."
+def hash_api_key(api_key: str) -> str:
+    digest = hmac.new(
+        credential_secret(),
+        b"bedrock-proxy-api-key\x00" + api_key.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"hmac-sha256${digest}"
+
+
+def hash_admin_password(password: str, salt: Optional[bytes] = None) -> str:
+    salt = salt or secrets.token_bytes(16)
+    peppered = hmac.new(
+        credential_secret(),
+        b"bedrock-proxy-admin-password\x00" + password.encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    digest = hashlib.pbkdf2_hmac("sha256", peppered, salt, PASSWORD_HASH_ITERATIONS)
+    return (
+        f"pbkdf2-sha256${PASSWORD_HASH_ITERATIONS}$"
+        f"{base64url_encode(salt)}${base64url_encode(digest)}"
+    )
+
+
+def verify_admin_password(password: str, stored_hash: str) -> bool:
+    try:
+        algorithm, iterations_text, salt_text, expected_digest = stored_hash.split("$", 3)
+        if algorithm != "pbkdf2-sha256":
+            return False
+        iterations = int(iterations_text)
+        if not 100_000 <= iterations <= 2_000_000:
+            return False
+        peppered = hmac.new(
+            credential_secret(),
+            b"bedrock-proxy-admin-password\x00" + password.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+        actual = hashlib.pbkdf2_hmac("sha256", peppered, base64url_decode(salt_text), iterations)
+        return hmac.compare_digest(base64url_encode(actual), expected_digest)
+    except (TypeError, ValueError):
+        return False
+
+
+def credentials_item_is_valid(item: Dict[str, Any]) -> bool:
+    return all(
+        isinstance(item.get(name), str) and bool(item[name])
+        for name in ("admin_username", "admin_password_hash", "api_key_hash")
+    )
+
+
+def load_credentials() -> Dict[str, Any]:
+    """Read credentials, or migrate one time from the legacy plaintext environment variables."""
+    credential_secret()
+    quota_table = table()
+    item = quota_table.get_item(Key={"quota_id": CREDENTIALS_KEY}, ConsistentRead=True).get("Item", {})
+    if credentials_item_is_valid(item):
+        return item
+    if item:
+        raise ValueError(f"DynamoDB item {CREDENTIALS_KEY} is incomplete or invalid.")
+
+    bootstrap_api_key = os.environ.get("API_KEY", "").strip()
+    bootstrap_password = os.environ.get("ADMIN_PASSWORD", "")
+    if len(bootstrap_api_key) < 24 or len(bootstrap_password) < 12:
+        raise ValueError(
+            "Credentials are not initialized. Temporarily set API_KEY (at least 24 characters) "
+            "and ADMIN_PASSWORD (at least 12 characters), then invoke the Lambda once."
+        )
+
+    initialized = {
+        "quota_id": CREDENTIALS_KEY,
+        "admin_username": DEFAULT_ADMIN_USERNAME,
+        "admin_password_hash": hash_admin_password(bootstrap_password),
+        "api_key_hash": hash_api_key(bootstrap_api_key),
+        "api_key_hint": f"…{bootstrap_api_key[-4:]}",
+        "credential_version": 1,
+        "updated_at": int(time.time()),
+    }
+    try:
+        quota_table.update_item(
+            Key={"quota_id": CREDENTIALS_KEY},
+            UpdateExpression=(
+                "SET admin_username = :username, admin_password_hash = :password_hash, "
+                "api_key_hash = :api_key_hash, api_key_hint = :api_key_hint, "
+                "credential_version = :version, updated_at = :updated_at"
+            ),
+            ConditionExpression="attribute_not_exists(quota_id)",
+            ExpressionAttributeValues={
+                ":username": initialized["admin_username"],
+                ":password_hash": initialized["admin_password_hash"],
+                ":api_key_hash": initialized["api_key_hash"],
+                ":api_key_hint": initialized["api_key_hint"],
+                ":version": Decimal(1),
+                ":updated_at": initialized["updated_at"],
+            },
+        )
+        return initialized
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            raise
+        item = quota_table.get_item(Key={"quota_id": CREDENTIALS_KEY}, ConsistentRead=True).get("Item", {})
+        if not credentials_item_is_valid(item):
+            raise ValueError(f"Could not initialize DynamoDB item {CREDENTIALS_KEY}.")
+        return item
+
+
+def authenticate(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    try:
+        credentials = load_credentials()
+    except ClientError as exc:
+        return credential_database_error(exc)
+    except ValueError as exc:
+        return openai_error(500, f"Authentication configuration error: {exc}", "server_error")
+
+    supplied_key = get_api_key(event)
+    if supplied_key == "anonymous" or not hmac.compare_digest(
+        hash_api_key(supplied_key), str(credentials["api_key_hash"])
+    ):
+        return openai_error(401, "Invalid or missing API key.", "authentication_error")
     return None
 
 
-def create_admin_session(username: str) -> Tuple[str, int]:
+def admin_configuration_error() -> Optional[str]:
+    if len(os.environ.get("ADMIN_SESSION_SECRET", "").encode("utf-8")) < 32:
+        return "ADMIN_SESSION_SECRET must be at least 32 bytes."
+    try:
+        credential_secret()
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def create_admin_session(username: str, credential_version: int) -> Tuple[str, int]:
     expires_at = int(time.time()) + ADMIN_SESSION_TTL_SECONDS
     payload = base64url_encode(
-        json.dumps({"sub": username, "exp": expires_at}, separators=(",", ":")).encode("utf-8")
+        json.dumps(
+            {"sub": username, "ver": credential_version, "exp": expires_at},
+            separators=(",", ":"),
+        ).encode("utf-8")
     )
     secret = os.environ["ADMIN_SESSION_SECRET"].encode("utf-8")
     signature = base64url_encode(hmac.new(secret, payload.encode("ascii"), hashlib.sha256).digest())
@@ -218,8 +346,13 @@ def verify_admin_session(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         claims = json.loads(base64url_decode(payload))
         if int(claims.get("exp", 0)) <= int(time.time()):
             return openai_error(401, "Admin session expired.", "authentication_error")
-        if not hmac.compare_digest(str(claims.get("sub", "")), ADMIN_USERNAME):
+        credentials = load_credentials()
+        if not hmac.compare_digest(str(claims.get("sub", "")), str(credentials["admin_username"])):
             raise ValueError("invalid subject")
+        if int(claims.get("ver", 0)) != int(credentials.get("credential_version", 1)):
+            raise ValueError("stale credential version")
+    except ClientError as exc:
+        return credential_database_error(exc)
     except (ValueError, TypeError, json.JSONDecodeError):
         return openai_error(401, "Invalid or missing admin session.", "authentication_error")
     return None
@@ -513,12 +646,18 @@ def handle_admin_login(event: Dict[str, Any]) -> Dict[str, Any]:
     body = parse_body(event)
     username = str(body.get("username", ""))
     password = str(body.get("password", ""))
+    try:
+        credentials = load_credentials()
+    except ClientError as exc:
+        return credential_database_error(exc)
+    except ValueError as exc:
+        return openai_error(500, f"Admin authentication is not configured: {exc}", "server_error")
     if not (
-        hmac.compare_digest(username, ADMIN_USERNAME)
-        and hmac.compare_digest(password, os.environ["ADMIN_PASSWORD"])
+        hmac.compare_digest(username, str(credentials["admin_username"]))
+        and verify_admin_password(password, str(credentials["admin_password_hash"]))
     ):
         return openai_error(401, "Invalid username or password.", "authentication_error")
-    token, expires_at = create_admin_session(username)
+    token, expires_at = create_admin_session(username, int(credentials.get("credential_version", 1)))
     return response(200, {"token": token, "expires_at": expires_at, "username": username})
 
 
@@ -527,6 +666,7 @@ def handle_admin_status() -> Dict[str, Any]:
     config = runtime_config()
     # Admin dashboard shows the global monthly record.
     quota = quota_snapshot("admin-dashboard")
+    credentials = load_credentials()
     return response(
         200,
         {
@@ -535,6 +675,11 @@ def handle_admin_status() -> Dict[str, Any]:
                 "monthly_budget_usd": config["monthly_budget_usd"],
                 "input_max_tokens": config["input_max_tokens"],
                 "output_max_tokens": config["output_max_tokens"],
+            },
+            "credentials": {
+                "admin_username": credentials["admin_username"],
+                "api_key_hint": credentials.get("api_key_hint", "hidden"),
+                "updated_at": int(credentials.get("updated_at", 0)) or None,
             },
             "models": [
                 {
@@ -546,6 +691,88 @@ def handle_admin_status() -> Dict[str, Any]:
             ],
         },
     )
+
+
+def valid_admin_username(username: str) -> bool:
+    return 3 <= len(username) <= 64 and all(character.isalnum() or character in "._-" for character in username)
+
+
+def handle_admin_credentials(event: Dict[str, Any]) -> Dict[str, Any]:
+    body = parse_body(event)
+    credentials = load_credentials()
+    current_password = str(body.get("current_password", ""))
+    if not verify_admin_password(current_password, str(credentials["admin_password_hash"])):
+        return openai_error(403, "Current admin password is incorrect.", "authentication_error")
+
+    username = str(body.get("admin_username", credentials["admin_username"])).strip()
+    if not valid_admin_username(username):
+        return openai_error(400, "Admin username must be 3-64 characters using letters, numbers, dot, dash or underscore.")
+
+    new_password = str(body.get("new_admin_password", ""))
+    new_api_key = str(body.get("new_api_key", "")).strip()
+    generate_api_key = body.get("generate_api_key", False)
+    if not isinstance(generate_api_key, bool):
+        return openai_error(400, "generate_api_key must be true or false.")
+    if generate_api_key and new_api_key:
+        return openai_error(400, "Choose either a custom API key or automatic generation, not both.")
+    if generate_api_key:
+        new_api_key = "brx_" + secrets.token_urlsafe(36)
+    if new_password and not 12 <= len(new_password) <= 256:
+        return openai_error(400, "New admin password must be between 12 and 256 characters.")
+    if new_api_key and not 24 <= len(new_api_key) <= 512:
+        return openai_error(400, "New API key must be between 24 and 512 characters.")
+
+    username_changed = username != str(credentials["admin_username"])
+    if not (username_changed or new_password or new_api_key):
+        return openai_error(400, "No credential change was requested.")
+
+    password_hash = hash_admin_password(new_password) if new_password else str(credentials["admin_password_hash"])
+    api_key_hash = hash_api_key(new_api_key) if new_api_key else str(credentials["api_key_hash"])
+    api_key_hint = f"…{new_api_key[-4:]}" if new_api_key else str(credentials.get("api_key_hint", "hidden"))
+    old_version = int(credentials.get("credential_version", 1))
+    new_version = old_version + 1
+    updated_at = int(time.time())
+
+    try:
+        table().update_item(
+            Key={"quota_id": CREDENTIALS_KEY},
+            UpdateExpression=(
+                "SET admin_username = :username, admin_password_hash = :password_hash, "
+                "api_key_hash = :api_key_hash, api_key_hint = :api_key_hint, "
+                "credential_version = :new_version, updated_at = :updated_at"
+            ),
+            ConditionExpression="admin_password_hash = :old_password_hash AND credential_version = :old_version",
+            ExpressionAttributeValues={
+                ":username": username,
+                ":password_hash": password_hash,
+                ":api_key_hash": api_key_hash,
+                ":api_key_hint": api_key_hint,
+                ":new_version": Decimal(new_version),
+                ":updated_at": updated_at,
+                ":old_password_hash": credentials["admin_password_hash"],
+                ":old_version": Decimal(old_version),
+            },
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return openai_error(409, "Credentials changed in another session. Reload and try again.")
+        raise
+
+    token, expires_at = create_admin_session(username, new_version)
+    result: Dict[str, Any] = {
+        "message": "Credentials updated.",
+        "token": token,
+        "expires_at": expires_at,
+        "username": username,
+        "credentials": {
+            "admin_username": username,
+            "api_key_hint": api_key_hint,
+            "updated_at": updated_at,
+        },
+    }
+    if new_api_key:
+        result["new_api_key"] = new_api_key
+    return response(200, result)
 
 
 def handle_admin_config(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -745,6 +972,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 return handle_admin_status()
             if method(event) == "PUT" and path == "/admin/config":
                 return handle_admin_config(event)
+            if method(event) == "PUT" and path == "/admin/credentials":
+                return handle_admin_credentials(event)
             return openai_error(404, f"Admin route not found: {method(event)} {path}")
 
         auth_error = authenticate(event)
