@@ -185,7 +185,7 @@ Role mặc định đã có quyền ghi CloudWatch Logs. Bổ sung Bedrock và D
 7. Policy name: `BedrockOpenAIProxyAccess`.
 8. Chọn **Create policy**.
 
-`bedrock:InvokeModel` là quyền mà Converse API hiện tại sử dụng. `bedrock:InvokeModelWithResponseStream` được cấp sẵn cho bản nâng cấp streaming sau này. `Resource: "*"` cho Bedrock được dùng để tránh thiếu quyền với Global Cross-Region Inference Profile và các model đích. Nếu AWS Organizations có SCP chặn một region đích, policy `Allow` ở role không thể ghi đè explicit deny đó.
+`bedrock:InvokeModel` dùng cho request non-streaming. `bedrock:InvokeModelWithResponseStream` dùng khi client gửi `stream=true`, ví dụ extension Cline trên VSCode. `Resource: "*"` cho Bedrock được dùng để tránh thiếu quyền với Global Cross-Region Inference Profile và các model đích. Nếu AWS Organizations có SCP chặn một region đích, policy `Allow` ở role không thể ghi đè explicit deny đó.
 
 ## 6. Hoàn tất quyền dùng các model
 
@@ -398,7 +398,7 @@ INVOKE_URL/dashboard
 Bản dashboard mới hiển thị cuối trang:
 
 ```text
-UI 2026.07.15-usage-history-v8 · Backend 2026.07.15-usage-history-v8
+UI 2026.07.15-usage-history-v8 · Backend 2026.07.16-bedrock-stream-v10
 ```
 
 Nếu vẫn không thấy đủ bốn model `amazon-nova-lite`, `claude-haiku-4.5`, `claude-sonnet-4.6`, `claude-sonnet-5`, bạn đang chạy code cũ:
@@ -450,7 +450,7 @@ Cả hai bảng đều có filter theo ngày/tháng và phân trang. Không cầ
 | HTTP 429 `insufficient_quota` | Đã hết budget hoặc reservation của request quá lớn | Dashboard xem remaining; giảm `max_tokens` hoặc tăng ngân sách USD/tháng rồi lưu |
 | Dashboard luôn bằng 0 | Chưa có request thành công hoặc request đi ngoài proxy | Chạy Lambda chat test, kiểm tra item `global#YYYY-MM` và `request#YYYY-MM#...` trong DynamoDB |
 | Tiền dashboard không khớp AWS Bill | Pricing JSON cũ, request đi ngoài proxy hoặc loại phí không được proxy tính | Cập nhật pricing; đối chiếu Bedrock Usage/Cost Explorer; bắt buộc mọi client đi qua proxy |
-| API Gateway `504` | Bedrock chạy quá giới hạn 30 giây của HTTP API | Giảm output/max_tokens; code hiện không hỗ trợ streaming; cân nhắc REST API response streaming cho workload dài |
+| API Gateway `504` | Bedrock chạy quá giới hạn 30 giây của HTTP API | Với Cline/VSCode nên dùng Lambda Function URL thay vì HTTP API Gateway; giảm output/max_tokens nếu vẫn quá lâu |
 | Lambda báo `Task timed out` | General configuration timeout còn thấp | Lambda → Configuration → General configuration → Edit → Timeout `5 min 0 sec` |
 | Lỗi reserved environment key | Đã tự thêm `AWS_REGION` | Xóa `AWS_REGION`; Lambda tự cung cấp biến này |
 
@@ -469,7 +469,7 @@ Cả hai bảng đều có filter theo ngày/tháng và phân trang. Không cầ
 - Usage token sau request lấy trực tiếp từ Bedrock và là số dùng để điều chỉnh tiền đã reserve.
 - Nếu Bedrock đã trả kết quả nhưng bước finalize DynamoDB lỗi, code giữ nguyên reservation bảo thủ để tránh ghi thiếu chi phí.
 - Tháng quota dùng UTC (`YYYY-MM`), không dùng múi giờ Việt Nam.
-- HTTP API giới hạn 30 giây và bản proxy hiện không hỗ trợ `stream=true`.
+- HTTP API giới hạn 30 giây. `stream=true` dùng Bedrock `ConverseStream`, nhưng nếu đi qua HTTP API Gateway client vẫn có thể gặp giới hạn timeout của API Gateway; Cline nên dùng Lambda Function URL.
 - Bedrock SDK read timeout mặc định là 240 giây, đặt bằng constant `BEDROCK_READ_TIMEOUT_SECONDS`.
 - Global Cross-Region Inference không đảm bảo dữ liệu chỉ được xử lý trong Singapore.
 

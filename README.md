@@ -12,7 +12,7 @@ Lambda này expose một API gần giống OpenAI:
 
 Phía sau Lambda gọi Amazon Bedrock `Converse API`, rồi convert response về format OpenAI Chat Completions. Proxy cũng có quota theo số tiền/tháng, lưu usage, cấu hình và credential đã hash trong DynamoDB.
 
-Hiện bản này hỗ trợ non-streaming chat completion. `stream=true`, tool calling, vision input chưa bật.
+Hiện bản này hỗ trợ non-streaming chat completion và `stream=true` bằng Bedrock `ConverseStream`, rồi convert sang OpenAI-compatible SSE `chat.completion.chunk`. Tool calling và vision input chưa bật.
 
 ## 1. Tạo DynamoDB table để lưu quota
 
@@ -231,6 +231,16 @@ Model Identifier: claude-haiku-4.5
 ```
 
 Nếu client yêu cầu OpenAI base URL và không tự thêm `/v1`, dùng `https://YOUR_FUNCTION_URL.lambda-url.ap-southeast-1.on.aws/v1`.
+
+Với Cline trên VSCode, nên cấu hình provider kiểu OpenAI-compatible:
+
+```text
+Base URL: https://YOUR_FUNCTION_URL.lambda-url.ap-southeast-1.on.aws/v1
+Model ID: claude-haiku-4.5 hoặc claude-sonnet-4.6
+API Key: API key đang quản lý trong dashboard
+```
+
+Cline thường gửi `stream=true`; backend bản `2026.07.16-bedrock-stream-v10` đã dùng Bedrock `ConverseStream` và trả SSE `chat.completion.chunk`. Nếu dùng API Gateway HTTP API mà request dài bị `504`, chuyển Cline sang Lambda Function URL vì HTTP API có giới hạn timeout 30 giây.
 
 Response mẫu:
 

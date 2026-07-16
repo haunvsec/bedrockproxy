@@ -455,6 +455,41 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(result["statusCode"], 200)
         self.assertEqual(bedrock.converse.call_args.kwargs["inferenceConfig"]["maxTokens"], 64000)
 
+    def test_stream_true_uses_bedrock_converse_stream_and_returns_openai_sse(self):
+        bedrock = Mock()
+        bedrock.converse_stream.return_value = {
+            "stream": [
+                {"messageStart": {"role": "assistant"}},
+                {"contentBlockDelta": {"delta": {"text": "streamed "}}},
+                {"contentBlockDelta": {"delta": {"text": "enough"}}},
+                {"messageStop": {"stopReason": "end_turn"}},
+                {"metadata": {"usage": {"inputTokens": 7, "outputTokens": 3, "totalTokens": 10}}},
+            ]
+        }
+        with patch.object(proxy, "runtime_config", return_value=proxy.default_runtime_config()), patch.object(
+            proxy, "reserve_budget", return_value={"enabled": False, "reserved_usd": 0.0}
+        ), patch.object(proxy, "bedrock", bedrock), patch.object(proxy, "current_timestamp", return_value=1784073600):
+            result = proxy.handle_chat_completions(
+                event(
+                    "POST",
+                    "/v1/chat/completions",
+                    {
+                        "model": "amazon-nova-lite",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "stream": True,
+                    },
+                    "client-secret",
+                )
+            )
+        self.assertEqual(result["statusCode"], 200)
+        self.assertIn("text/event-stream", result["headers"]["content-type"])
+        self.assertIn('"object": "chat.completion.chunk"', result["body"])
+        self.assertIn("streamed ", result["body"])
+        self.assertIn("enough", result["body"])
+        self.assertTrue(result["body"].endswith("data: [DONE]\n\n"))
+        bedrock.converse.assert_not_called()
+        bedrock.converse_stream.assert_called_once()
+
     def test_admin_can_rotate_password_and_api_key(self):
         memory_table = MemoryTable()
         with patch.object(proxy, "table", return_value=memory_table):

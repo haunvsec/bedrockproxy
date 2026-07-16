@@ -90,7 +90,7 @@ CONFIG_KEY = "config#proxy"
 CREDENTIALS_KEY = "auth#credentials"
 ADMIN_SESSION_TTL_SECONDS = 8 * 60 * 60
 PASSWORD_HASH_ITERATIONS = 210_000
-PROXY_VERSION = "2026.07.15-usage-history-v8"
+PROXY_VERSION = "2026.07.16-bedrock-stream-v10"
 HISTORY_MONTH_LIMIT = 24
 DEFAULT_HISTORY_PAGE_SIZE = 10
 MAX_HISTORY_PAGE_SIZE = 100
@@ -107,6 +107,20 @@ def response(status_code: int, body: Dict[str, Any], headers: Optional[Dict[str,
             **(headers or {}),
         },
         "body": json.dumps(body, ensure_ascii=False),
+    }
+
+
+def text_response(status_code: int, body: str, content_type: str, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    return {
+        "statusCode": status_code,
+        "headers": {
+            "content-type": content_type,
+            "access-control-allow-origin": "*",
+            "access-control-allow-headers": "authorization,content-type,x-api-key",
+            "access-control-allow-methods": "GET,POST,PUT,OPTIONS",
+            **(headers or {}),
+        },
+        "body": body,
     }
 
 
@@ -780,6 +794,41 @@ def finish_reason_from_bedrock(stop_reason: Optional[str]) -> str:
     return mapping.get(stop_reason or "", "stop")
 
 
+def sse_data(payload: Any) -> str:
+    if payload == "[DONE]":
+        return "data: [DONE]\n\n"
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def openai_stream_chunk(
+    completion_id: str,
+    created: int,
+    model: str,
+    delta: Dict[str, Any],
+    finish_reason: Optional[str] = None,
+    usage: Optional[Dict[str, int]] = None,
+) -> Dict[str, Any]:
+    chunk: Dict[str, Any] = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+    }
+    if usage is not None:
+        chunk["usage"] = usage
+    return chunk
+
+
+def openai_stream_response(body: str) -> Dict[str, Any]:
+    return text_response(
+        200,
+        body,
+        "text/event-stream; charset=utf-8",
+        {"cache-control": "no-cache", "x-accel-buffering": "no"},
+    )
+
+
 def handle_models(event: Dict[str, Any]) -> Dict[str, Any]:
     model_map = DEFAULT_MODEL_MAP
     config = runtime_config()
@@ -1182,10 +1231,76 @@ def handle_admin_config(event: Dict[str, Any]) -> Dict[str, Any]:
     return handle_admin_status()
 
 
+def handle_bedrock_stream(
+    *,
+    converse_args: Dict[str, Any],
+    reservation: Dict[str, Any],
+    api_key: str,
+    requested_model: str,
+    model_id: str,
+) -> Tuple[Dict[str, Any], int, int, int, float]:
+    created = current_timestamp()
+    completion_id = f"chatcmpl-bedrock-{created}"
+    body_parts = [sse_data(openai_stream_chunk(completion_id, created, requested_model, {"role": "assistant"}))]
+    text_parts: List[str] = []
+    stop_reason = "end_turn"
+    input_tokens = 0
+    output_tokens = 0
+
+    result = bedrock.converse_stream(**converse_args)
+    for event in result.get("stream", []):
+        if "contentBlockDelta" in event:
+            delta = event["contentBlockDelta"].get("delta", {})
+            text = str(delta.get("text", ""))
+            if text:
+                text_parts.append(text)
+                body_parts.append(
+                    sse_data(openai_stream_chunk(completion_id, created, requested_model, {"content": text}))
+                )
+        elif "messageStop" in event:
+            stop_reason = str(event["messageStop"].get("stopReason") or stop_reason)
+        elif "metadata" in event:
+            usage = event["metadata"].get("usage", {})
+            input_tokens = int(usage.get("inputTokens", input_tokens))
+            output_tokens = int(usage.get("outputTokens", output_tokens))
+
+    total_tokens = input_tokens + output_tokens
+    actual_usd = cost_usd(model_id, input_tokens, output_tokens) if reservation.get("enabled") else 0.0
+    finalize_budget(reservation, actual_usd, input_tokens, output_tokens)
+    if reservation.get("enabled"):
+        log_request_usage(
+            api_key=api_key,
+            requested_model=requested_model,
+            bedrock_model_id=model_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost=actual_usd,
+            created_at=created,
+        )
+    usage_body = {
+        "prompt_tokens": input_tokens,
+        "completion_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+    body_parts.append(
+        sse_data(
+            openai_stream_chunk(
+                completion_id,
+                created,
+                requested_model,
+                {},
+                finish_reason=finish_reason_from_bedrock(stop_reason),
+                usage=usage_body,
+            )
+        )
+    )
+    body_parts.append(sse_data("[DONE]"))
+    return openai_stream_response("".join(body_parts)), input_tokens, output_tokens, total_tokens, actual_usd
+
+
 def handle_chat_completions(event: Dict[str, Any]) -> Dict[str, Any]:
     body = parse_body(event)
-    if body.get("stream"):
-        return openai_error(400, "stream=true is not implemented in this Lambda proxy yet.")
+    stream = bool(body.get("stream"))
 
     model_map = DEFAULT_MODEL_MAP
     config = runtime_config()
@@ -1268,6 +1383,20 @@ def handle_chat_completions(event: Dict[str, Any]) -> Dict[str, Any]:
         if system:
             converse_args["system"] = system
 
+        if stream:
+            # A stream can become billable before local accounting completes; keep the reservation
+            # on downstream failures rather than under-counting spend.
+            bedrock_completed = True
+            stream_response, _, _, _, _ = handle_bedrock_stream(
+                converse_args=converse_args,
+                reservation=reservation,
+                api_key=api_key,
+                requested_model=requested_model,
+                model_id=model_id,
+            )
+            bedrock_completed = True
+            return stream_response
+
         result = bedrock.converse(**converse_args)
         bedrock_completed = True
         usage = result.get("usage", {})
@@ -1288,27 +1417,31 @@ def handle_chat_completions(event: Dict[str, Any]) -> Dict[str, Any]:
                 created_at=created,
             )
 
+        completion_id = f"chatcmpl-bedrock-{created}"
+        content = output_text_from_bedrock(result)
+        finish_reason = finish_reason_from_bedrock(result.get("stopReason"))
+        usage_body = {
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": total_tokens,
+        }
         choice = {
             "index": 0,
             "message": {
                 "role": "assistant",
-                "content": output_text_from_bedrock(result),
+                "content": content,
             },
-            "finish_reason": finish_reason_from_bedrock(result.get("stopReason")),
+            "finish_reason": finish_reason,
         }
         return response(
             200,
             {
-                "id": f"chatcmpl-bedrock-{created}",
+                "id": completion_id,
                 "object": "chat.completion",
                 "created": created,
                 "model": requested_model,
                 "choices": [choice],
-                "usage": {
-                    "prompt_tokens": input_tokens,
-                    "completion_tokens": output_tokens,
-                    "total_tokens": total_tokens,
-                },
+                "usage": usage_body,
                 "bedrock": {
                     "model_id": model_id,
                     "estimated_cost_usd": round(actual_usd, 8) if reservation.get("enabled") else None,
