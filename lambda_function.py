@@ -90,7 +90,7 @@ CONFIG_KEY = "config#proxy"
 CREDENTIALS_KEY = "auth#credentials"
 ADMIN_SESSION_TTL_SECONDS = 8 * 60 * 60
 PASSWORD_HASH_ITERATIONS = 210_000
-PROXY_VERSION = "2026.07.16-cline-stream-v11"
+PROXY_VERSION = "2026.07.17-cline-tools-v12"
 HISTORY_MONTH_LIMIT = 24
 DEFAULT_HISTORY_PAGE_SIZE = 10
 MAX_HISTORY_PAGE_SIZE = 100
@@ -743,6 +743,29 @@ def text_from_openai_content(content: Any) -> str:
     return str(content)
 
 
+def append_bedrock_message(messages: List[Dict[str, Any]], role: str, content: List[Dict[str, Any]]) -> None:
+    if messages and messages[-1]["role"] == role:
+        messages[-1]["content"].extend(content)
+    else:
+        messages.append({"role": role, "content": content})
+
+
+def parse_tool_arguments(arguments: Any) -> Dict[str, Any]:
+    if isinstance(arguments, dict):
+        return arguments
+    if arguments in (None, ""):
+        return {}
+    if not isinstance(arguments, str):
+        raise ValueError("tool call function.arguments must be a JSON object or JSON string.")
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError as exc:
+        raise ValueError("tool call function.arguments must contain valid JSON.") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("tool call function.arguments must decode to a JSON object.")
+    return parsed
+
+
 def convert_messages(openai_messages: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     system: List[Dict[str, Any]] = []
     messages: List[Dict[str, Any]] = []
@@ -758,13 +781,41 @@ def convert_messages(openai_messages: List[Dict[str, Any]]) -> Tuple[List[Dict[s
                 system.append({"text": text})
             continue
 
+        if role == "tool":
+            tool_call_id = str(msg.get("tool_call_id") or "")
+            if not tool_call_id:
+                raise ValueError("A tool message must include tool_call_id.")
+            append_bedrock_message(
+                messages,
+                "user",
+                [{"toolResult": {"toolUseId": tool_call_id, "content": [{"text": text or " "}]}}],
+            )
+            continue
+
         bedrock_role = "assistant" if role == "assistant" else "user"
-        if not text:
-            text = " "
-        if messages and messages[-1]["role"] == bedrock_role:
-            messages[-1]["content"].append({"text": "\n" + text})
-        else:
-            messages.append({"role": bedrock_role, "content": [{"text": text}]})
+        content_blocks: List[Dict[str, Any]] = []
+        if text:
+            content_blocks.append({"text": text})
+        if role == "assistant":
+            tool_calls = msg.get("tool_calls") or []
+            if not isinstance(tool_calls, list):
+                raise ValueError("assistant tool_calls must be a list.")
+            for tool_call in tool_calls:
+                function = tool_call.get("function", {}) if isinstance(tool_call, dict) else {}
+                tool_use_id = str(tool_call.get("id") or "") if isinstance(tool_call, dict) else ""
+                name = str(function.get("name") or "")
+                if not tool_use_id or not name:
+                    raise ValueError("Each assistant tool call must include id and function.name.")
+                content_blocks.append(
+                    {
+                        "toolUse": {
+                            "toolUseId": tool_use_id,
+                            "name": name,
+                            "input": parse_tool_arguments(function.get("arguments")),
+                        }
+                    }
+                )
+        append_bedrock_message(messages, bedrock_role, content_blocks or [{"text": " "}])
 
     if not messages:
         messages.append({"role": "user", "content": [{"text": " "}]})
@@ -774,6 +825,43 @@ def convert_messages(openai_messages: List[Dict[str, Any]]) -> Tuple[List[Dict[s
     return messages, system
 
 
+def convert_tools(openai_tools: Any, tool_choice: Any = None) -> Optional[Dict[str, Any]]:
+    if openai_tools in (None, []):
+        return None
+    if not isinstance(openai_tools, list):
+        raise ValueError("tools must be a list.")
+    tools = []
+    for item in openai_tools:
+        if not isinstance(item, dict):
+            raise ValueError("Each tool must be an OpenAI function tool with a name and JSON schema parameters.")
+        function = item.get("function", {})
+        name = str(function.get("name") or "")
+        parameters = function.get("parameters", {"type": "object", "properties": {}})
+        if item.get("type") != "function" or not name or not isinstance(parameters, dict):
+            raise ValueError("Each tool must be an OpenAI function tool with a name and JSON schema parameters.")
+        tool_spec: Dict[str, Any] = {"name": name, "inputSchema": {"json": parameters}}
+        if function.get("description"):
+            tool_spec["description"] = str(function["description"])
+        tools.append({"toolSpec": tool_spec})
+
+    result: Dict[str, Any] = {"tools": tools}
+    if tool_choice in (None, "auto"):
+        result["toolChoice"] = {"auto": {}}
+    elif tool_choice == "required":
+        result["toolChoice"] = {"any": {}}
+    elif tool_choice == "none":
+        return None
+    elif isinstance(tool_choice, dict):
+        function = tool_choice.get("function", {})
+        name = str(function.get("name") or "") if isinstance(function, dict) else ""
+        if not name:
+            raise ValueError("tool_choice function must include a name.")
+        result["toolChoice"] = {"tool": {"name": name}}
+    else:
+        raise ValueError("Unsupported tool_choice value.")
+    return result
+
+
 def output_text_from_bedrock(result: Dict[str, Any]) -> str:
     content = result.get("output", {}).get("message", {}).get("content", [])
     parts = []
@@ -781,6 +869,26 @@ def output_text_from_bedrock(result: Dict[str, Any]) -> str:
         if "text" in block:
             parts.append(block["text"])
     return "".join(parts)
+
+
+def output_tool_calls_from_bedrock(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    content = result.get("output", {}).get("message", {}).get("content", [])
+    tool_calls = []
+    for block in content:
+        tool_use = block.get("toolUse") if isinstance(block, dict) else None
+        if not isinstance(tool_use, dict):
+            continue
+        tool_calls.append(
+            {
+                "id": str(tool_use.get("toolUseId") or ""),
+                "type": "function",
+                "function": {
+                    "name": str(tool_use.get("name") or ""),
+                    "arguments": json.dumps(tool_use.get("input", {}), ensure_ascii=False, separators=(",", ":")),
+                },
+            }
+        )
+    return tool_calls
 
 
 def finish_reason_from_bedrock(stop_reason: Optional[str]) -> str:
@@ -1247,17 +1355,70 @@ def handle_bedrock_stream(
     stop_reason = "end_turn"
     input_tokens = 0
     output_tokens = 0
+    tool_indexes: Dict[int, int] = {}
+    next_tool_index = 0
 
     result = bedrock.converse_stream(**converse_args)
     for event in result.get("stream", []):
-        if "contentBlockDelta" in event:
-            delta = event["contentBlockDelta"].get("delta", {})
+        if "contentBlockStart" in event:
+            block_start = event["contentBlockStart"]
+            start = block_start.get("start", {})
+            tool_use = start.get("toolUse") if isinstance(start, dict) else None
+            if isinstance(tool_use, dict):
+                block_index = int(block_start.get("contentBlockIndex", next_tool_index))
+                tool_index = next_tool_index
+                next_tool_index += 1
+                tool_indexes[block_index] = tool_index
+                body_parts.append(
+                    sse_data(
+                        openai_stream_chunk(
+                            completion_id,
+                            created,
+                            requested_model,
+                            {
+                                "tool_calls": [
+                                    {
+                                        "index": tool_index,
+                                        "id": str(tool_use.get("toolUseId") or ""),
+                                        "type": "function",
+                                        "function": {"name": str(tool_use.get("name") or ""), "arguments": ""},
+                                    }
+                                ]
+                            },
+                        )
+                    )
+                )
+        elif "contentBlockDelta" in event:
+            block_delta = event["contentBlockDelta"]
+            delta = block_delta.get("delta", {})
             text = str(delta.get("text", ""))
             if text:
                 text_parts.append(text)
                 body_parts.append(
                     sse_data(openai_stream_chunk(completion_id, created, requested_model, {"content": text}))
                 )
+            tool_use_delta = delta.get("toolUse") if isinstance(delta, dict) else None
+            if isinstance(tool_use_delta, dict):
+                block_index = int(block_delta.get("contentBlockIndex", 0))
+                tool_index = tool_indexes.get(block_index)
+                if tool_index is not None:
+                    body_parts.append(
+                        sse_data(
+                            openai_stream_chunk(
+                                completion_id,
+                                created,
+                                requested_model,
+                                {
+                                    "tool_calls": [
+                                        {
+                                            "index": tool_index,
+                                            "function": {"arguments": str(tool_use_delta.get("input", ""))},
+                                        }
+                                    ]
+                                },
+                            )
+                        )
+                    )
         elif "messageStop" in event:
             stop_reason = str(event["messageStop"].get("stopReason") or stop_reason)
         elif "metadata" in event:
@@ -1356,6 +1517,7 @@ def handle_chat_completions(event: Dict[str, Any]) -> Dict[str, Any]:
 
     try:
         messages, system = convert_messages(openai_messages)
+        tool_config = convert_tools(body.get("tools"), body.get("tool_choice"))
     except ValueError as exc:
         return openai_error(400, str(exc))
     estimated_input_tokens = estimate_tokens_from_messages(openai_messages)
@@ -1385,6 +1547,8 @@ def handle_chat_completions(event: Dict[str, Any]) -> Dict[str, Any]:
         }
         if system:
             converse_args["system"] = system
+        if tool_config:
+            converse_args["toolConfig"] = tool_config
 
         if stream:
             # A stream can become billable before local accounting completes; keep the reservation
@@ -1423,18 +1587,22 @@ def handle_chat_completions(event: Dict[str, Any]) -> Dict[str, Any]:
 
         completion_id = f"chatcmpl-bedrock-{created}"
         content = output_text_from_bedrock(result)
+        tool_calls = output_tool_calls_from_bedrock(result)
         finish_reason = finish_reason_from_bedrock(result.get("stopReason"))
         usage_body = {
             "prompt_tokens": input_tokens,
             "completion_tokens": output_tokens,
             "total_tokens": total_tokens,
         }
+        message: Dict[str, Any] = {
+            "role": "assistant",
+            "content": None if tool_calls and not content else content,
+        }
+        if tool_calls:
+            message["tool_calls"] = tool_calls
         choice = {
             "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": content,
-            },
+            "message": message,
             "finish_reason": finish_reason,
         }
         return response(

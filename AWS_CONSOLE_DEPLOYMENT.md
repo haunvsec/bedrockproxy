@@ -398,7 +398,7 @@ INVOKE_URL/dashboard
 Bản dashboard mới hiển thị cuối trang:
 
 ```text
-UI 2026.07.17-compact-models-v9 · Backend 2026.07.16-cline-stream-v11
+UI 2026.07.17-compact-models-v9 · Backend 2026.07.17-cline-tools-v12
 ```
 
 Nếu vẫn không thấy đủ bốn model `amazon-nova-lite`, `claude-haiku-4.5`, `claude-sonnet-4.6`, `claude-sonnet-5`, bạn đang chạy code cũ:

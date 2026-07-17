@@ -520,6 +520,137 @@ class ProxyTests(unittest.TestCase):
         self.assertIn('"usage"', result["body"])
         self.assertIn('"prompt_tokens": 7', result["body"])
 
+    def test_cline_stream_tools_are_converted_to_bedrock_and_openai_chunks(self):
+        bedrock = Mock()
+        bedrock.converse_stream.return_value = {
+            "stream": [
+                {
+                    "contentBlockStart": {
+                        "contentBlockIndex": 0,
+                        "start": {"toolUse": {"toolUseId": "call_123", "name": "attempt_completion"}},
+                    }
+                },
+                {
+                    "contentBlockDelta": {
+                        "contentBlockIndex": 0,
+                        "delta": {"toolUse": {"input": '{"result":"Hello'}},
+                    }
+                },
+                {
+                    "contentBlockDelta": {
+                        "contentBlockIndex": 0,
+                        "delta": {"toolUse": {"input": '!"}'}},
+                    }
+                },
+                {"contentBlockStop": {"contentBlockIndex": 0}},
+                {"messageStop": {"stopReason": "tool_use"}},
+                {"metadata": {"usage": {"inputTokens": 20, "outputTokens": 8, "totalTokens": 28}}},
+            ]
+        }
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "attempt_completion",
+                    "description": "Finish the task",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"result": {"type": "string"}},
+                        "required": ["result"],
+                    },
+                },
+            }
+        ]
+        with patch.object(proxy, "runtime_config", return_value=proxy.default_runtime_config()), patch.object(
+            proxy, "reserve_budget", return_value={"enabled": False, "reserved_usd": 0.0}
+        ), patch.object(proxy, "bedrock", bedrock):
+            result = proxy.handle_chat_completions(
+                event(
+                    "POST",
+                    "/v1/chat/completions",
+                    {
+                        "model": "claude-haiku-4.5",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "tools": tools,
+                        "tool_choice": "auto",
+                        "stream": True,
+                    },
+                    "client-secret",
+                )
+            )
+
+        self.assertEqual(result["statusCode"], 200)
+        converse_args = bedrock.converse_stream.call_args.kwargs
+        self.assertEqual(converse_args["toolConfig"]["tools"][0]["toolSpec"]["name"], "attempt_completion")
+        self.assertEqual(converse_args["toolConfig"]["toolChoice"], {"auto": {}})
+        self.assertIn('"tool_calls"', result["body"])
+        self.assertIn('"id": "call_123"', result["body"])
+        self.assertIn('"name": "attempt_completion"', result["body"])
+        self.assertIn('"finish_reason": "tool_calls"', result["body"])
+        self.assertTrue(result["body"].endswith("data: [DONE]\n\n"))
+
+    def test_cline_tool_result_messages_round_trip_to_bedrock(self):
+        messages, _ = proxy.convert_messages(
+            [
+                {"role": "user", "content": "Complete this task"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_123",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": '{"path":"README.md"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_123", "content": "file contents"},
+            ]
+        )
+        self.assertEqual(messages[1]["content"][0]["toolUse"]["name"], "read_file")
+        self.assertEqual(messages[1]["content"][0]["toolUse"]["input"], {"path": "README.md"})
+        self.assertEqual(messages[2]["content"][0]["toolResult"]["toolUseId"], "call_123")
+
+    def test_non_stream_tool_use_returns_openai_tool_calls(self):
+        bedrock = Mock()
+        bedrock.converse.return_value = {
+            "output": {
+                "message": {
+                    "content": [
+                        {
+                            "toolUse": {
+                                "toolUseId": "call_456",
+                                "name": "read_file",
+                                "input": {"path": "README.md"},
+                            }
+                        }
+                    ]
+                }
+            },
+            "usage": {"inputTokens": 12, "outputTokens": 5, "totalTokens": 17},
+            "stopReason": "tool_use",
+        }
+        with patch.object(proxy, "runtime_config", return_value=proxy.default_runtime_config()), patch.object(
+            proxy, "reserve_budget", return_value={"enabled": False, "reserved_usd": 0.0}
+        ), patch.object(proxy, "bedrock", bedrock):
+            result = proxy.handle_chat_completions(
+                event(
+                    "POST",
+                    "/v1/chat/completions",
+                    {
+                        "model": "claude-haiku-4.5",
+                        "messages": [{"role": "user", "content": "read the file"}],
+                    },
+                    "client-secret",
+                )
+            )
+        body = json.loads(result["body"])
+        message = body["choices"][0]["message"]
+        self.assertIsNone(message["content"])
+        self.assertEqual(message["tool_calls"][0]["id"], "call_456")
+        self.assertEqual(message["tool_calls"][0]["function"]["arguments"], '{"path":"README.md"}')
+        self.assertEqual(body["choices"][0]["finish_reason"], "tool_calls")
+
     def test_admin_can_rotate_password_and_api_key(self):
         memory_table = MemoryTable()
         with patch.object(proxy, "table", return_value=memory_table):

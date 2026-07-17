@@ -12,7 +12,7 @@ Lambda này expose một API gần giống OpenAI:
 
 Phía sau Lambda gọi Amazon Bedrock `Converse API`, rồi convert response về format OpenAI Chat Completions. Proxy cũng có quota theo số tiền/tháng, lưu usage, cấu hình và credential đã hash trong DynamoDB.
 
-Hiện bản này hỗ trợ non-streaming chat completion và `stream=true` bằng Bedrock `ConverseStream`, rồi convert sang OpenAI-compatible SSE `chat.completion.chunk`. Tool calling và vision input chưa bật.
+Hiện bản này hỗ trợ non-streaming chat completion, `stream=true` bằng Bedrock `ConverseStream`, và OpenAI-compatible function/tool calling cho Cline. Vision input chưa bật.
 
 ## 1. Tạo DynamoDB table để lưu quota
 
@@ -240,7 +240,7 @@ Model ID: claude-haiku-4.5 hoặc claude-sonnet-4.6
 API Key: API key đang quản lý trong dashboard
 ```
 
-Cline thường gửi `stream=true`; backend bản `2026.07.16-cline-stream-v11` đã dùng Bedrock `ConverseStream` và trả SSE `chat.completion.chunk`. Mặc định stream không trả `usage` trong final chunk để tương thích parser khó tính; quota/log vẫn được ghi ở backend. Nếu dùng API Gateway HTTP API mà request dài bị `504`, chuyển Cline sang Lambda Function URL vì HTTP API có giới hạn timeout 30 giây.
+Cline thường gửi `stream=true` kèm danh sách function tools; backend bản `2026.07.17-cline-tools-v12` chuyển OpenAI `tools`, `tool_calls` và tool-result messages hai chiều với Bedrock `toolConfig`, `toolUse` và `toolResult`. Mặc định stream không trả `usage` trong final chunk để tương thích parser khó tính; quota/log vẫn được ghi ở backend. Nếu dùng API Gateway HTTP API mà request dài bị `504`, chuyển Cline sang Lambda Function URL vì HTTP API có giới hạn timeout 30 giây.
 
 Test stream trực tiếp bằng Function URL:
 
