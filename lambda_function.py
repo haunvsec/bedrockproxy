@@ -55,7 +55,7 @@ DEFAULT_MODEL_PRICING = {
 DEFAULT_MODEL_GUIDANCE = {
     "amazon-nova-lite": {
         "display_name": "Amazon Nova 2 Lite",
-        "description": "Model giá thấp và nhanh; model gốc hỗ trợ đa phương thức nhưng proxy hiện nhận text.",
+        "description": "M",
         "recommended_for": "Chat thường, tóm tắt, phân loại, xử lý tài liệu và tự động hóa đơn giản.",
         "context_window_tokens": 1_000_000,
         "max_output_tokens": 64_000,
@@ -69,14 +69,14 @@ DEFAULT_MODEL_GUIDANCE = {
     },
     "claude-sonnet-4.6": {
         "display_name": "Claude Sonnet 4.6",
-        "description": "Sonnet ổn định đã được kiểm chứng, mạnh cho coding, agent và tác vụ chuyên sâu.",
+        "description": "",
         "recommended_for": "Coding, phân tích dài, workflow nhiều bước và agent cần chất lượng cao.",
         "context_window_tokens": 1_000_000,
         "max_output_tokens": 64_000,
     },
     "claude-sonnet-5": {
         "display_name": "Claude Sonnet 5",
-        "description": "Sonnet mới nhất, ưu tiên tác vụ coding, agent và reasoning phức tạp.",
+        "description": "",
         "recommended_for": "Tác vụ khó cần output đến 128K token, khi account đã được cấp model access.",
         "context_window_tokens": 1_000_000,
         "max_output_tokens": 128_000,

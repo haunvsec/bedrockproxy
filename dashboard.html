@@ -56,7 +56,6 @@
     .model-head { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:15px; align-items:center; }
     .model strong,.model small { display:block; overflow-wrap:anywhere; }
     .model small { color:var(--muted); margin-top:5px; }
-    .model-description { margin:12px 0 0; color:#c8d5e5; font-size:14px; }
     .model-meta { display:flex; flex-wrap:wrap; gap:7px; margin-top:11px; }
     .chip { padding:5px 8px; color:#bcd1ea; background:#12243a; border:1px solid #29415e; border-radius:999px; font-size:12px; }
     .model-actions { display:flex; justify-content:flex-end; margin-top:14px; }
@@ -213,7 +212,7 @@
       <div id="credentialError" class="error"></div><div id="credentialSuccess" class="success">Đã cập nhật. Các phiên admin cũ đã bị vô hiệu hóa.</div>
       <div id="newApiKeyResult" class="secret-result">Hãy sao chép API key mới ngay; hệ thống sẽ không hiển thị lại.<code id="newApiKeyValue"></code><div class="actions"><button id="copyApiKey" class="copy" type="button">Sao chép API key</button></div></div>
     </form>
-    <footer>Phiên đăng nhập chỉ lưu trong tab hiện tại và tự hết hạn. <span id="buildInfo">UI 2026.07.15-usage-history-v8</span></footer>
+    <footer>Phiên đăng nhập chỉ lưu trong tab hiện tại và tự hết hạn. <span id="buildInfo">UI 2026.07.17-compact-models-v9</span></footer>
   </main>
 
   <script>
@@ -322,7 +321,7 @@
       $('updated').textContent=q.updated_at?`Cập nhật ${new Date(q.updated_at*1000).toLocaleString('vi-VN')}`:'Chưa có request trong tháng';
       $('budgetLock').textContent=modelBudgetLocked?'Đã kích hoạt khóa ngân sách tháng: toàn bộ model tự động tắt. Hãy tăng ngân sách lên cao hơn số tiền đã dùng để tự mở lại model, hoặc chờ sang tháng UTC mới.' : '';
       $('budgetLock').style.display=modelBudgetLocked?'block':'none'; $('saveModelsButton').disabled=modelBudgetLocked;
-      $('buildInfo').textContent=`UI 2026.07.15-usage-history-v8 · Backend ${data.proxy_version||'không rõ/đang dùng bản cũ'}`;
+      $('buildInfo').textContent=`UI 2026.07.17-compact-models-v9 · Backend ${data.proxy_version||'không rõ/đang dùng bản cũ'}`;
       renderHistory(data.history||[q],q.month);
       $('monthlyBudget').value=data.config.monthly_budget_usd; $('inputLimit').value=data.config.input_max_tokens; $('outputLimit').value=data.config.output_max_tokens;
       if(data.credentials){ $('adminUsername').value=data.credentials.admin_username; $('apiKeyHint').textContent=data.credentials.api_key_hint; $('adminName').textContent=`Đăng nhập: ${data.credentials.admin_username}`; }
@@ -336,8 +335,6 @@
         const label=document.createElement('label'); label.className='switch'; label.title=model.auto_disabled?'Model bị khóa tự động do hết ngân sách':`Bật/tắt ${model.alias}`;
         const checkbox=document.createElement('input'); checkbox.type='checkbox'; checkbox.checked=model.enabled; checkbox.disabled=Boolean(model.auto_disabled); checkbox.dataset.model=model.alias; checkbox.dataset.configured=String(model.configured_enabled);
         const slider=document.createElement('span'); slider.className='slider'; label.append(checkbox,slider); head.append(info,label); row.append(head);
-        const description=document.createElement('p'); description.className='model-description'; description.textContent=model.description; row.append(description);
-        const useCase=document.createElement('p'); useCase.className='guide-note'; useCase.textContent=`Khuyến nghị: ${model.recommended_for}`; row.append(useCase);
         const meta=document.createElement('div'); meta.className='model-meta';
         [`Input $${model.input_price_per_million}/1M`,`Output $${model.output_price_per_million}/1M`,`Context ${number(model.context_window_tokens)}`,`Max output ${number(model.max_output_tokens)}`].forEach(text=>{ const chip=document.createElement('span'); chip.className='chip'; chip.textContent=text; meta.append(chip); }); row.append(meta);
         const actions=document.createElement('div'); actions.className='model-actions'; const setupButton=document.createElement('button'); setupButton.type='button'; setupButton.className='model-setup'; setupButton.textContent='Cấu hình client'; setupButton.addEventListener('click',()=>openSetupDialog(model,data.credentials)); actions.append(setupButton); row.append(actions);
