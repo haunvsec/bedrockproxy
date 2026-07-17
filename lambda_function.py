@@ -90,7 +90,7 @@ CONFIG_KEY = "config#proxy"
 CREDENTIALS_KEY = "auth#credentials"
 ADMIN_SESSION_TTL_SECONDS = 8 * 60 * 60
 PASSWORD_HASH_ITERATIONS = 210_000
-PROXY_VERSION = "2026.07.16-bedrock-stream-v10"
+PROXY_VERSION = "2026.07.16-cline-stream-v11"
 HISTORY_MONTH_LIMIT = 24
 DEFAULT_HISTORY_PAGE_SIZE = 10
 MAX_HISTORY_PAGE_SIZE = 100
@@ -825,7 +825,7 @@ def openai_stream_response(body: str) -> Dict[str, Any]:
         200,
         body,
         "text/event-stream; charset=utf-8",
-        {"cache-control": "no-cache", "x-accel-buffering": "no"},
+        {"cache-control": "no-cache", "connection": "keep-alive", "x-accel-buffering": "no"},
     )
 
 
@@ -1238,6 +1238,7 @@ def handle_bedrock_stream(
     api_key: str,
     requested_model: str,
     model_id: str,
+    include_usage: bool = False,
 ) -> Tuple[Dict[str, Any], int, int, int, float]:
     created = current_timestamp()
     completion_id = f"chatcmpl-bedrock-{created}"
@@ -1290,7 +1291,7 @@ def handle_bedrock_stream(
                 requested_model,
                 {},
                 finish_reason=finish_reason_from_bedrock(stop_reason),
-                usage=usage_body,
+                usage=usage_body if include_usage else None,
             )
         )
     )
@@ -1301,6 +1302,8 @@ def handle_bedrock_stream(
 def handle_chat_completions(event: Dict[str, Any]) -> Dict[str, Any]:
     body = parse_body(event)
     stream = bool(body.get("stream"))
+    stream_options = body.get("stream_options") if isinstance(body.get("stream_options"), dict) else {}
+    include_stream_usage = bool(stream_options.get("include_usage"))
 
     model_map = DEFAULT_MODEL_MAP
     config = runtime_config()
@@ -1393,6 +1396,7 @@ def handle_chat_completions(event: Dict[str, Any]) -> Dict[str, Any]:
                 api_key=api_key,
                 requested_model=requested_model,
                 model_id=model_id,
+                include_usage=include_stream_usage,
             )
             bedrock_completed = True
             return stream_response

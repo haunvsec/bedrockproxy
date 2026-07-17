@@ -240,7 +240,18 @@ Model ID: claude-haiku-4.5 hoặc claude-sonnet-4.6
 API Key: API key đang quản lý trong dashboard
 ```
 
-Cline thường gửi `stream=true`; backend bản `2026.07.16-bedrock-stream-v10` đã dùng Bedrock `ConverseStream` và trả SSE `chat.completion.chunk`. Nếu dùng API Gateway HTTP API mà request dài bị `504`, chuyển Cline sang Lambda Function URL vì HTTP API có giới hạn timeout 30 giây.
+Cline thường gửi `stream=true`; backend bản `2026.07.16-cline-stream-v11` đã dùng Bedrock `ConverseStream` và trả SSE `chat.completion.chunk`. Mặc định stream không trả `usage` trong final chunk để tương thích parser khó tính; quota/log vẫn được ghi ở backend. Nếu dùng API Gateway HTTP API mà request dài bị `504`, chuyển Cline sang Lambda Function URL vì HTTP API có giới hạn timeout 30 giây.
+
+Test stream trực tiếp bằng Function URL:
+
+```bash
+curl -N https://YOUR_FUNCTION_URL.lambda-url.ap-southeast-1.on.aws/v1/chat/completions \
+  -H "content-type: application/json" \
+  -H "authorization: Bearer YOUR_API_KEY" \
+  -d '{"model":"claude-haiku-4.5","stream":true,"messages":[{"role":"user","content":"Say hello in one short sentence"}],"max_tokens":64}'
+```
+
+Kết quả đúng sẽ có nhiều dòng `data: {"object":"chat.completion.chunk",...}` và dòng cuối `data: [DONE]`.
 
 Response mẫu:
 

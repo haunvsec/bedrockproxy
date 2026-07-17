@@ -398,7 +398,7 @@ INVOKE_URL/dashboard
 Bản dashboard mới hiển thị cuối trang:
 
 ```text
-UI 2026.07.15-usage-history-v8 · Backend 2026.07.16-bedrock-stream-v10
+UI 2026.07.15-usage-history-v8 · Backend 2026.07.16-cline-stream-v11
 ```
 
 Nếu vẫn không thấy đủ bốn model `amazon-nova-lite`, `claude-haiku-4.5`, `claude-sonnet-4.6`, `claude-sonnet-5`, bạn đang chạy code cũ:
